@@ -1,0 +1,16 @@
+[package]
+name = "rubevy"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Run mruby bytecode (via SabiRuby) inside Bevy"
+keywords = ["bevy", "mruby", "ruby", "scripting"]
+
+[dependencies]
+# Not on crates.io yet: expects https://github.com/kishima/sabiruby checked out next to this repo.
+sabiruby = { path = "../sabiruby" }
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
+thiserror = "2"
+
+[dev-dependencies]
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }
