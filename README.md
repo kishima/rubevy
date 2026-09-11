@@ -1,7 +1,7 @@
 # rubevy
 
 Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
-[SabiRuby](../sabiruby) VM.
+[SabiRuby](https://crates.io/crates/sabiruby) VM.
 
 ## What works (2026-09-11, v0)
 
@@ -16,8 +16,9 @@ sharing objects between scripts, Fiber-based coroutines.
 
 ## Try it
 
-`Cargo.toml` depends on SabiRuby by path, so clone both repositories side by side
-(`kishima/sabiruby` and `kishima/rubevy` in the same parent directory).
+`Cargo.toml` depends on the `sabiruby` crate from crates.io. To develop against a local
+checkout of `kishima/sabiruby` next to this repository, create `.cargo/config.toml` with
+`paths = ["../sabiruby"]` (the file is ignored by git).
 
 ```
 tools/compile_scripts.sh          # assets/scripts/*.rb -> .mrb (Docker, reference mrbc)
