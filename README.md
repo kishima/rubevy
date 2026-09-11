@@ -37,3 +37,7 @@ commands.spawn(Script::new(mrb).with_budget(5_000));
 ## License
 
 MIT.
+
+## Outlook
+
+What rubevy will build on SabiRuby's planned features, why it fits Bevy, and an honest assessment: [`docs/outlook.md`](docs/outlook.md).
