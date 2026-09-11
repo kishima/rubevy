@@ -100,3 +100,47 @@ VM (mruby-metaprog is ported). The per-frame path stays in Rust; Ruby runs at
 declaration time, on events, and in coroutines that yield most frames. Design the ECS
 bridge for that shape first (build once, apply as `Commands`), not for per-frame
 component reads.
+
+## Possibilities (the ambitious version, 2026-09-12)
+
+Each of these follows from one property the VM already has or has planned; none is
+free, but none needs a new kind of VM.
+
+1. **The game as a live image.** Compiler in the engine + `eval`/`load` + state as data:
+   edit Ruby while the game runs, redefine a method and the NPC changes behaviour
+   mid-animation; an in-game REPL that talks to entities. Sonic Pi proved that a Ruby DSL
+   is a live-coding instrument; rubevy can be that for visuals and play. Needs: `Host`,
+   eval, the debugger pane (planned).
+2. **Snapshot the whole script state.** Registers, frames, heap, fibers are plain data,
+   so a VM can be serialized: save games that include coroutines mid-`sleep`, rewind as
+   a mechanic, replays, deterministic lockstep netcode with state hashes (the VM is
+   no_std and takes time and randomness only through `Host`, so runs are reproducible by
+   construction). Needs: `Vm` serialization (a walk over `heap`/`contexts`; ~1 week), a
+   rule for `Data` objects.
+3. **One cartridge, three machines.** The same `.mrb` runs in Bevy on a PC, in the
+   browser (Bevy wasm, or the playground), and on a microcontroller-class device — the
+   author's own hardware line (family-mruby) is the obvious third target. A Ruby fantasy
+   console: write once, play on the desk, in a link, and in the hand. Needs: the
+   embedded target of SabiRuby (thumbv7em builds in CI already), a small display API in
+   `Host`.
+4. **Safe user and AI content.** Instruction budgets, a heap the host can cap, no I/O
+   except through `Host`: a mod or an LLM-written script cannot hang the frame, exhaust
+   memory or touch files. LLMs write Ruby well; an NPC brain can be generated at play
+   time, compiled by the in-engine compiler, and run as a task with a budget. The test
+   suite and the book are what make "safe" a claim with evidence. Needs: heap cap,
+   per-task budgets (task), a `Host` policy for what scripts may reach.
+5. **Thousands of small minds.** mruby-task + fibers with tiny budgets: every NPC a Ruby
+   task, scheduled by priority, sleeping most frames. VMs are small (no_std), so one per
+   faction or one per entity are both affordable. Needs: task (planned), `gc_step`.
+6. **Learning by seeing the machine.** The playground's visualizer in the game window:
+   beginners write Ruby, see entities move, and can open the VM to see the registers and
+   the frames. Ruby is a teaching language in Japan; a game engine with a transparent VM
+   is a course, not just a tool.
+7. **Prototype in CRuby, ship in Bevy.** The scripting subset is mruby's, so gameplay
+   rules can be prototyped and unit-tested with CRuby's tooling, then run unchanged in
+   the engine (`tests/custom` already compares against CRuby where mruby's semantics
+   agree).
+
+The thread through all of them: the VM is a *value* (data, deterministic, budgeted),
+not a process. That is what Lua embeddings do not give you cheaply, and it is where
+rubevy can be more than "Ruby in Bevy".
