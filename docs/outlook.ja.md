@@ -127,3 +127,33 @@ Ruby 側から見ると次の意味があります。
 限界も書いておきます。コンパイラは本家の C のまま（Prism とコード生成）なので、ソースを読む段階は Rust の保証の外です（Prism はよくファジングされていますが）。
 panic は安全ですが止まります。ゲームで使うなら「VM は panic しない」を目標にする作業（`unwrap`／`expect`／`panic!` は今 122 か所。多くは内部の不変条件）と、
 ホスト側で `catch_unwind` する備えが要ります。メモリ安全は「意味が正しい」ことを保証しません。正しさは本家のテストで測っています。
+
+## 補足: 本体は Rust、一部だけ Ruby という使い方（2026-09-12、著者の質問）
+
+それが rubevy の想定する形そのものです。Ruby は「全部を書く言語」ではなく、Rust のゲームに**部分的に差し込む**ものです。
+
+* Rust が持つもの: ゲームループ、描画、物理、入力、大半の system。今までどおりの Bevy です
+* Ruby を付ける場所: `Script` コンポーネントを付けたエンティティ（NPC の挙動）、シーンを組み立てる `.rb`（DSL で spawn）、イベントの受け口
+* Ruby を付けないエンティティには何の影響もない。Ruby の VM は `Script` が付いたぶんだけ作られ、Rust の system が決めたタイミング（どのスケジュール、どの予算）でだけ動く
+
+```rust
+// Rust 側: 普通の Bevy。NPC にだけ Ruby を付ける
+commands.spawn((Npc, SpriteBundle { .. }, Script::new(asset_server.load("npc/guard.rb")).with_budget(20_000)));
+// Ruby から呼べる関数を登録する（ネイティブメソッド。生ポインタは要らない）
+rubevy.define("play_sound", |vm, args| { /* Rust の処理 */ Ok(Value::Nil) });
+```
+
+```ruby
+# npc/guard.rb: 挙動だけ Ruby。フレームをまたぐ動きはコルーチンで
+on(:player_seen) { |player| chase(player) }
+loop do
+  patrol_to(:point_a); sleep 2
+  patrol_to(:point_b); sleep 2
+end
+```
+
+Ruby 側のミスがゲーム全体に及ばないことも、この形の利点です。命令数の予算で 1 フレームに使える時間が決まり、例外は `ScriptError` イベントになり、
+メモリ破壊は起きません。リリース時に Ruby を外したければ、`Script` を付けなければよいだけです（機能ごと feature で外すこともできます）。
+
+今の v0 で既にある: エンティティごとの VM、毎フレームの予算つき実行、`$frame`／`$delta`、ログ。足りないのは ECS の橋（エンティティを Ruby から触る）、
+イベントの受け口、Host（コンパイラと時計）で、どれも計画の前半にあります。
