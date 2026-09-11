@@ -157,3 +157,32 @@ Ruby 側のミスがゲーム全体に及ばないことも、この形の利点
 
 今の v0 で既にある: エンティティごとの VM、毎フレームの予算つき実行、`$frame`／`$delta`、ログ。足りないのは ECS の橋（エンティティを Ruby から触る）、
 イベントの受け口、Host（コンパイラと時計）で、どれも計画の前半にあります。
+
+## 補足: Rust と Ruby の相互呼び出し（2026-09-12、著者の質問）
+
+どちらの向きもできます。mruby の C 拡張と `mrb_funcall` に相当するものが、そのまま Rust にあります。
+
+* **Rust → Ruby**: `vm.funcall(receiver, method_sym, &args, block)`、ブロックなら `vm.call_block(blk, &args)`。戻り値は `Result<Value, VmError>`
+* **Ruby → Rust**: ネイティブメソッドは `fn(&mut Vm, self, &[Value], block) -> VmResult<Value>` の Rust 関数。`vm.define_method(class, "name", f)` で登録する
+* **Ruby → Rust → Ruby**: ネイティブの中で `vm.funcall` を呼べる。VM は入れ子の実行ループを Rust のスタック上で回す（本家の `mrb_funcall` → `mrb_vm_run` と同じ形）。
+  何段でも入れ子にできる
+
+```rust
+fn each_enemy(vm: &mut Vm, _self: Value, args: &[Value], blk: Value) -> VmResult<Value> {
+    for e in enemies() {                       // Rust 側のデータ
+        let obj = wrap_entity(vm, e);          // Entity を Ruby オブジェクトに
+        vm.call_block(blk, &[obj])?;           // Ruby のブロックを呼ぶ。例外は `?` で伝わる
+    }
+    Ok(Value::Nil)
+}
+```
+
+本家と違って良くなる点が 1 つあります。Ruby 側の例外は longjmp ではなく `Err` として Rust に戻るので、`?` で素直に伝えられ、
+途中の Rust の値の後始末（`Drop`）が必ず走ります。本家の C 拡張では longjmp が C の途中の処理を飛び越えるので、資源の解放を自分で守る必要がありました。
+
+約束事（本家と同じもの）:
+
+* ネイティブの実行中は GC が回収しない（`native_active`）。Rust の手元にある `Value` は安全だが、長いネイティブは GC を遅らせる
+* ネイティブの境界をまたいで Fiber を切り替えることはできない（`FiberError`。本家と同じ制約）
+* 命令数の予算による中断は、入れ子の実行ループの中では効かない。ネイティブから呼んだ Ruby メソッドが長いと、戻ってくるまで止まれない。
+  毎フレームの予算で止めたい処理は、ネイティブ経由ではなくトップレベルの Ruby から呼ぶ形にする
