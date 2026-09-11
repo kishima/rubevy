@@ -88,3 +88,15 @@ Weak points to state plainly: performance (interpreter speed and GC pauses until
 more language to learn for a Bevy team. A fair summary: **rubevy is the right choice for
 someone who wants Ruby in Bevy, and a reasonable one for someone who wants a small,
 inspectable, verifiable scripting VM; it is not a reason to leave Lua.**
+
+## Direction (author, 2026-09-12)
+
+Do not compete with Lua on speed; the languages are different. rubevy's strength is
+**Ruby as a DSL**: scripts describe things (entities and bundles, scenes, state machines,
+behaviour trees, timelines, dialogue, tuning tables) and Rust systems run them. Ruby's
+tools for that — blocks, `instance_eval`/`class_eval` with a block, `method_missing`,
+`define_method`, keyword arguments, `Module#included`-style hooks — are already in the
+VM (mruby-metaprog is ported). The per-frame path stays in Rust; Ruby runs at
+declaration time, on events, and in coroutines that yield most frames. Design the ECS
+bridge for that shape first (build once, apply as `Commands`), not for per-frame
+component reads.
