@@ -40,4 +40,4 @@ MIT.
 
 ## Outlook
 
-What rubevy will build on SabiRuby's planned features, why it fits Bevy, and an honest assessment: [`docs/outlook.md`](docs/outlook.md).
+What rubevy will build on SabiRuby's planned features, why it fits Bevy, and an honest assessment: [`docs/outlook.md`](docs/outlook.md) (日本語の平易版: [`docs/outlook.ja.md`](docs/outlook.ja.md)).
