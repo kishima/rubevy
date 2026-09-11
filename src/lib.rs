@@ -181,8 +181,8 @@ fn step_scripts(
 fn set_host_globals(vm: &mut Vm, frame: u32, delta: f32) {
     let f = vm.intern("$frame");
     let d = vm.intern("$delta");
-    vm.globals.insert(f, sabiruby::Value::Int(frame as i64));
-    vm.globals.insert(d, sabiruby::Value::Float(delta as f64));
+    vm.globals.insert(f, sabiruby::value::Slot::from(sabiruby::Value::Int(frame as i64)));
+    vm.globals.insert(d, sabiruby::value::Slot::from(sabiruby::Value::Float(delta as f64)));
 }
 
 fn flush_output(vm: &mut Vm, entity: Entity) {
