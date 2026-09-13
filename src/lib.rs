@@ -104,6 +104,26 @@ pub struct ScriptTask {
     task: ObjId,
 }
 
+impl ScriptTask {
+    /// The scheduler's id for this script, for the `Vm::task_*` entry points.
+    pub fn task(&self) -> ObjId {
+        self.task
+    }
+}
+
+/// What a host can show of a running script (`ScriptWorld::stats`).
+#[derive(Debug, Clone, Default)]
+pub struct ScriptStats {
+    /// Instructions this script has run since it started. The difference between two frames is
+    /// what it spent on that frame.
+    pub instructions: u64,
+    /// Where it stands in its own source: file and line, while it waits as well as while it
+    /// runs. `None` where the program carries no debug info.
+    pub location: Option<(String, u32)>,
+    /// Whether the task has run to its end.
+    pub finished: bool,
+}
+
 /// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
 /// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
 /// again.
@@ -195,6 +215,16 @@ impl ScriptWorld {
         }
         install_host_api(&mut vm);
         Ok(ScriptWorld { vm, budget: 200_000, tick_remainder: 0.0, requests: Vec::new() })
+    }
+
+    /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
+    /// from the entity's [`ScriptTask`].
+    pub fn stats(&self, script: &ScriptTask) -> ScriptStats {
+        ScriptStats {
+            instructions: self.vm.task_instructions(script.task),
+            location: self.vm.task_location(script.task),
+            finished: self.vm.task_finished(script.task),
+        }
     }
 
     /// The requests scripts made since the last call (`Rubevy.ask`), for a system of the game to

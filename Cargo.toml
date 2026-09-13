@@ -13,17 +13,17 @@ default = []
 ruby-source = ["dep:sabiruby-compiler"]
 
 [dependencies]
-# https://crates.io/crates/sabiruby, from crates.io like any other dependency, so that a clone
-# of this repository alone builds. To work against a checkout of the VM next to this one, put
-# the redirect in `.cargo/config.toml` (git-ignored), which leaves this file alone:
-#   [patch.crates-io]
+# The VM, from git while the host entry points this plugin needs are still being added (the
+# published 0.4.0 is behind). A clone of this repository still builds on its own — cargo fetches
+# it — and this goes back to a crates.io version once the API settles. To work against a checkout
+# of the VM next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
+#   [patch."https://github.com/kishima/sabiruby"]
 #   sabiruby = { path = "../sabiruby" }
-#   sabiruby-compiler = { path = "../sabiruby/compiler" }
-sabiruby = "0.4"
+sabiruby = { git = "https://github.com/kishima/sabiruby" }
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
 # only for the `ruby-source` feature
-sabiruby-compiler = { version = "0.2.1", features = ["host"], optional = true }
+sabiruby-compiler = { git = "https://github.com/kishima/sabiruby", features = ["host"], optional = true }
 
 [dev-dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }

@@ -2255,8 +2255,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "sabiruby"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8081ba50ef57cff6433baf9af0fff6763937d2f8c764df0d9af18633fc9b56d0"
+source = "git+https://github.com/kishima/sabiruby#d9232a5abeed059e6ed02cacd5c4f5a502813fed"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
@@ -2266,8 +2265,7 @@ dependencies = [
 [[package]]
 name = "sabiruby-compiler"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a435a556c705415f0ea872822f44241e09489becc31506a1a5fc9dfbf673d1ee"
+source = "git+https://github.com/kishima/sabiruby#d9232a5abeed059e6ed02cacd5c4f5a502813fed"
 dependencies = [
  "cc",
  "sabiruby",

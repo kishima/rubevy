@@ -75,13 +75,22 @@ one script from eating a frame — a script that never sleeps is preempted and r
 
 ## Building against the VM
 
-`Cargo.toml` names the published `sabiruby` (0.4, which has `Vm::task_queue_new` /
-`task_queue_push`), so a clone of this repository alone builds. To work against a checkout of the
-VM next to this one, redirect it in a git-ignored `.cargo/config.toml` instead of editing
-`Cargo.toml`:
+`Cargo.toml` names the VM from git while the entry points this plugin needs are still being added
+(`Vm::task_instructions` and `task_location` are newer than the published 0.4.0). A clone still
+builds on its own — cargo fetches it — and it goes back to a crates.io version once the API
+settles. To work against a checkout of the VM next to this one, redirect it in a git-ignored
+`.cargo/config.toml` instead of editing `Cargo.toml`:
 
 ```toml
-[patch.crates-io]
+[patch."https://github.com/kishima/sabiruby"]
 sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
+
+## What a HUD can show of a script
+
+`ScriptWorld::stats(&ScriptTask)` answers a [`ScriptStats`]: the instructions the script has run
+(the difference between two frames is what it spent on that frame), where it stands in its own
+source (file and line — while it waits as well as while it runs), and whether it is finished.
+It is what makes a panel like "Scout — robots/scout.rb:12 — 4,200 insn" possible, which is the
+thing this VM can show and an engine's usual scripting cannot.
