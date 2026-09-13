@@ -158,7 +158,29 @@ enum HostCommand {
     Despawn(u64),
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
     /// `Rubevy.ask`: the script is parked on a queue until the game answers it.
-    Ask { entity: u64, kind: String, args: Vec<f32>, queue: ObjId },
+    Ask { entity: u64, kind: String, args: Vec<Arg>, queue: ObjId },
+}
+
+/// An argument of `Rubevy.ask`, after the name of what is being asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Arg {
+    Num(f64),
+    Text(String),
+}
+
+impl Arg {
+    pub fn as_num(&self) -> Option<f64> {
+        match self {
+            Arg::Num(n) => Some(*n),
+            Arg::Text(_) => None,
+        }
+    }
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Arg::Text(t) => Some(t),
+            Arg::Num(_) => None,
+        }
+    }
 }
 
 /// Something a script asked the game for and is waiting on (`Rubevy.ask`). Take them with
@@ -171,8 +193,8 @@ pub struct Request {
     pub entity: Option<Entity>,
     /// The first argument of `Rubevy.ask`, e.g. `"scan"`.
     pub kind: String,
-    /// The rest of the arguments, as numbers.
-    pub args: Vec<f32>,
+    /// The rest of the arguments: numbers and strings, in the order they were written.
+    pub args: Vec<Arg>,
     /// Hand this back to [`ScriptWorld::answer`]; it is the queue the script waits on.
     pub queue: ObjId,
 }
@@ -186,6 +208,23 @@ pub enum Answer {
     Text(String),
     /// A list of numbers, e.g. a position or what a sensor found.
     List(Vec<f64>),
+    /// A list of rows of numbers: a table, e.g. every robot with its team and hp.
+    Rows(Vec<Vec<f64>>),
+}
+
+impl Request {
+    /// The `i`th argument as a number, where it is one.
+    pub fn num(&self, i: usize) -> Option<f64> {
+        self.args.get(i).and_then(Arg::as_num)
+    }
+    /// The `i`th argument as a string, where it is one.
+    pub fn text(&self, i: usize) -> Option<&str> {
+        self.args.get(i).and_then(Arg::as_text)
+    }
+    /// The `i`th argument as a number, or `or` where there is none.
+    pub fn num_or(&self, i: usize, or: f64) -> f64 {
+        self.num(i).unwrap_or(or)
+    }
 }
 
 /// Marks and names an entity a script spawned (`Rubevy.spawn`).
@@ -249,6 +288,16 @@ impl ScriptWorld {
             Answer::Text(t) => self.vm.str_new(t.as_bytes()),
             Answer::List(ns) => {
                 let items: Vec<Value> = ns.into_iter().map(Value::Float).collect();
+                self.vm.ary_new(items)
+            }
+            Answer::Rows(rows) => {
+                let items: Vec<Value> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let cells: Vec<Value> = row.into_iter().map(Value::Float).collect();
+                        self.vm.ary_new(cells)
+                    })
+                    .collect();
                 self.vm.ary_new(items)
             }
         };
@@ -537,7 +586,18 @@ fn install_host_api(vm: &mut Vm) {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("ask needs what to ask for")),
         };
-        let args: Vec<f32> = a[1..].iter().map(|v| num(vm, Some(v))).collect();
+        let mut args: Vec<Arg> = Vec::with_capacity(a.len().saturating_sub(1));
+        for v in &a[1..] {
+            args.push(match v {
+                Value::Int(i) => Arg::Num(*i as f64),
+                Value::Float(f) => Arg::Num(*f),
+                Value::Sym(s) => Arg::Text(vm.sym_name(*s).to_string()),
+                other => match vm.as_string(*other) {
+                    Ok(bytes) => Arg::Text(String::from_utf8_lossy(&bytes).into_owned()),
+                    Err(_) => Arg::Num(0.0),
+                },
+            });
+        }
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);
         let entity = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };

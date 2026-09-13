@@ -57,8 +57,11 @@ actually run.
 * A request you cannot answer yet is yours to keep; nothing expires. If the script should not wait
   forever, it can say so on the Ruby side: `Rubevy.ask(…).pop(timeout_ms: 500)` answers nil when
   the deadline passes.
-* `kind` is a string and `args` are numbers. That is deliberate for now: it keeps the boundary
-  small while the games decide what they actually need.
+* `kind` is a string; the arguments after it are numbers or strings ([`Arg`]), and
+  `Request::num(i)` / `Request::text(i)` read them. An answer is nil, a bool, a number, a string,
+  a list of numbers, or a table of them ([`Answer::Rows`] — every robot with its team and hp, say).
+  The boundary is deliberately that small: it is enough for a game to ask anything and get a
+  table back, without a serialisation format between the two.
 
 ## What the script sees of the frame
 

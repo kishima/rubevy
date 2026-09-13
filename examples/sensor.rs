@@ -55,7 +55,7 @@ fn answer_requests(mut world: ResMut<ScriptWorld>, mut pending: ResMut<Pending>,
     for (request, _) in ready {
         let answer = match request.kind.as_str() {
             // a sensor that finds something, except on the third round
-            "scan" if request.args.first().copied().unwrap_or(0.0) > 1.0 => {
+            "scan" if request.num_or(0, 0.0) > 1.0 => {
                 Answer::List(vec![now as f64 % 7.0, 3.5])
             }
             _ => Answer::Nil,
