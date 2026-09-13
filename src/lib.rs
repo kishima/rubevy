@@ -133,6 +133,35 @@ enum HostCommand {
     Spawn { name: String, x: f32, y: f32, z: f32 },
     Despawn(u64),
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
+    /// `Rubevy.ask`: the script is parked on a queue until the game answers it.
+    Ask { entity: u64, kind: String, args: Vec<f32>, queue: ObjId },
+}
+
+/// Something a script asked the game for and is waiting on (`Rubevy.ask`). Take them with
+/// [`ScriptWorld::take_requests`] in a system of your own, work out the answer, and give it back
+/// with [`ScriptWorld::answer`] — this frame or any later one. The script's task is parked
+/// meanwhile, so it costs nothing and the other scripts keep running.
+#[derive(Debug, Clone)]
+pub struct Request {
+    /// The entity whose script asked, where it has one.
+    pub entity: Option<Entity>,
+    /// The first argument of `Rubevy.ask`, e.g. `"scan"`.
+    pub kind: String,
+    /// The rest of the arguments, as numbers.
+    pub args: Vec<f32>,
+    /// Hand this back to [`ScriptWorld::answer`]; it is the queue the script waits on.
+    pub queue: ObjId,
+}
+
+/// What a game answers a [`Request`] with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answer {
+    Nil,
+    Bool(bool),
+    Num(f64),
+    Text(String),
+    /// A list of numbers, e.g. a position or what a sensor found.
+    List(Vec<f64>),
 }
 
 /// Marks and names an entity a script spawned (`Rubevy.spawn`).
@@ -149,6 +178,8 @@ pub struct ScriptWorld {
     pub budget: u64,
     /// Ticks not yet handed to the scheduler (frame times shorter than a tick).
     tick_remainder: f32,
+    /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
+    requests: Vec<Request>,
 }
 
 impl ScriptWorld {
@@ -163,7 +194,34 @@ impl ScriptWorld {
             return Err(format!("GC.scheduler_driven: {e}"));
         }
         install_host_api(&mut vm);
-        Ok(ScriptWorld { vm, budget: 200_000, tick_remainder: 0.0 })
+        Ok(ScriptWorld { vm, budget: 200_000, tick_remainder: 0.0, requests: Vec::new() })
+    }
+
+    /// The requests scripts made since the last call (`Rubevy.ask`), for a system of the game to
+    /// answer. A request stays valid until it is answered: keep the ones you cannot answer yet
+    /// and hand them back to [`ScriptWorld::answer`] on a later frame.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Answers a request: the script's `Rubevy.ask` returns this value and its task becomes
+    /// ready again. The queue is let go of here, so answer each request once.
+    pub fn answer(&mut self, request: &Request, answer: Answer) {
+        let value = match answer {
+            Answer::Nil => Value::Nil,
+            Answer::Bool(b) => Value::bool(b),
+            Answer::Num(n) => Value::Float(n),
+            Answer::Text(t) => self.vm.str_new(t.as_bytes()),
+            Answer::List(ns) => {
+                let items: Vec<Value> = ns.into_iter().map(Value::Float).collect();
+                self.vm.ary_new(items)
+            }
+        };
+        if let Err(e) = self.vm.task_queue_push(request.queue, value) {
+            let message = self.vm.describe_error(&e);
+            error!("rubevy: could not answer {}: {message}", request.kind);
+        }
+        self.vm.gc_unregister(request.queue);
     }
 }
 
@@ -366,9 +424,18 @@ fn flush_output(vm: &mut Vm) {
 }
 
 /// Carries out what the scripts asked for this frame.
-fn drain_commands(mut commands: Commands, mut transforms: Query<&mut Transform>) {
+fn drain_commands(
+    mut commands: Commands,
+    mut transforms: Query<&mut Transform>,
+    mut world: ResMut<ScriptWorld>,
+) {
     for c in take_commands() {
         match c {
+            HostCommand::Ask { entity, kind, args, queue } => {
+                // parked scripts wait here until a system of the game answers
+                // (`ScriptWorld::take_requests` / `answer`)
+                world.requests.push(Request { entity: entity_from_bits(entity), kind, args, queue });
+            }
             HostCommand::Log(text) => info!("[script] {text}"),
             HostCommand::Spawn { name, x, y, z } => {
                 commands.spawn((SpawnedByScript { name }, Transform::from_xyz(x, y, z)));
@@ -427,6 +494,20 @@ fn install_host_api(vm: &mut Vm) {
         let (x, y, z) = (num(vm, a.first()), num(vm, a.get(1)), num(vm, a.get(2)));
         push_command(HostCommand::SetPosition { entity: bits as u64, x, y, z });
         Ok(Value::Nil)
+    });
+    // `Rubevy.ask("scan", 40)` — the game answers it, this frame or a later one, and the script
+    // waits on the queue meanwhile (its task is parked, so it costs nothing)
+    vm.define_method(sc, "ask", |vm, _s, a, _b| {
+        let kind = match a.first() {
+            Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
+            None => return Err(vm.raise_arg("ask needs what to ask for")),
+        };
+        let args: Vec<f32> = a[1..].iter().map(|v| num(vm, Some(v))).collect();
+        let queue = vm.task_queue_new()?;
+        vm.gc_register(queue);
+        let entity = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
+        push_command(HostCommand::Ask { entity, kind, args, queue });
+        Ok(Value::Obj(queue))
     });
     vm.define_method(sc, "set_position", |vm, _s, a, _b| {
         let bits = a.first().map(|v| vm.expect_int(*v, "entity")).transpose()?.unwrap_or(0) as u64;
