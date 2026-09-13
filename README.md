@@ -3,22 +3,37 @@
 Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 [SabiRuby](https://crates.io/crates/sabiruby) VM.
 
-## What works (2026-09-11, v0)
+## What works (2026-09-13, v1: tasks)
 
 * `.mrb` files (compiled with mruby 4.1's `mrbc`) load as `MrbAsset` through Bevy's asset server.
-* `Script` component: one VM per entity, created when the asset arrives, stepped every
-  frame with an instruction budget so a busy script cannot stall a frame.
-* The script reads `$frame` and `$delta`; `puts`/`p` go to Bevy's log; a `ScriptEnded`
-  message reports completion or an uncaught exception.
+* **One VM for the app, one task per script.** A `Script` component becomes a task of
+  mruby-task's scheduler; every frame the plugin moves the scheduler's clock on by the
+  frame time and lets the ready tasks run for a budget of instructions. A task that
+  calls `sleep` costs nothing until its time comes, and one that never yields is
+  preempted at its timeslice, so a frame cannot be lost to a runaway script.
+* **Priorities**: `Script::with_priority` (0 first, 128 by default), mruby-task's.
+* **A host API**: `Rubevy.log`, `.spawn`, `.despawn`, `.set_position`, `.move_to`, and
+  `.entity` (the entity this script is attached to). A native cannot touch the Bevy
+  world, so these leave a command behind and a system carries it out after the frame's
+  scripts have run — the same promise `Commands` makes.
+* The script reads `$rubevy` (`:frame`, `:delta`, `:time`); `puts`/`p` go to Bevy's log;
+  a `ScriptEnded` message carries what the task answered, or the exception it did not
+  handle (mruby-task makes that the task's result, so one broken script does not stop
+  the others).
+* **`require`** reads from the asset directory: `.mrb` always, `.rb` in a build with the
+  `ruby-source` feature (which brings the reference compiler along).
+* The collector runs at the scheduler's idle points (`GC.scheduler_driven`).
 
-Not yet: a host API (spawning entities, reading components, events), hot reload,
-sharing objects between scripts, Fiber-based coroutines.
+Scripts share the VM, so they share globals and constants. That is the design; a use
+that needs isolation wants a second VM, which this plugin does not build yet.
+
+Not yet: reading components other than the ones above, events, hot reload, the
+reflection bridge (`docs/outlook.md`).
 
 ## Try it
 
-`Cargo.toml` depends on the `sabiruby` crate from crates.io. To develop against a local
-checkout of `kishima/sabiruby` next to this repository, create `.cargo/config.toml` with
-`paths = ["../sabiruby"]` (the file is ignored by git).
+`Cargo.toml` points at a checkout of `kishima/sabiruby` next to this repository and at the
+`sabiruby` crate for a published build.
 
 ```
 tools/compile_scripts.sh          # assets/scripts/*.rb -> .mrb (Docker, reference mrbc)
@@ -28,10 +43,18 @@ cargo run --example headless      # MinimalPlugins + AssetPlugin + RubevyPlugin,
 ```rust
 use rubevy::{MrbAsset, RubevyPlugin, Script};
 
-app.add_plugins(RubevyPlugin);
+app.add_plugins(RubevyPlugin::default());   // or ::with_asset_root("assets")
 // in a system:
-let mrb: Handle<MrbAsset> = server.load("scripts/hello.mrb");
-commands.spawn(Script::new(mrb).with_budget(5_000));
+let mrb: Handle<MrbAsset> = server.load("scripts/npc.mrb");
+commands.spawn((Script::new(mrb).with_name("npc").with_priority(100), Transform::default()));
+```
+
+```ruby
+# assets/scripts/npc.rb
+loop do
+  Rubevy.move_to($rubevy[:time].sin * 5, 0, 0)
+  sleep 0.1          # the task is off the CPU until then
+end
 ```
 
 ## License

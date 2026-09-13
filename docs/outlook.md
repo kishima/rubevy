@@ -8,6 +8,16 @@ assets, one VM per `Script` entity, stepped each frame with an instruction budge
 
 ## What rubevy builds (the bridge), in order
 
+> **Done as of 2026-09-13 (v1)**: 6 (mruby-task — one VM, one task per script, the frame as
+> the tick, a budget per frame, priorities), the deferred-write half of 3 (`Rubevy.spawn`,
+> `.despawn`, `.set_position`, `.move_to`, `.entity` through a command queue a system drains),
+> the `read_file` half of 1 (`require` from the asset directory; `.rb` behind the
+> `ruby-source` feature), 5 in its task form (`sleep` across frames, which is mruby-task's
+> rather than a raw fiber's — and the two cannot be mixed, see the VM's `gems.md`), and 8
+> (`GC.scheduler_driven`, the scheduler collecting at its idle points). What is left is hot
+> reload (2), the object/reflection half of 3 and 4, events (7), the in-game debugger (9)
+> and the web build (11).
+
 1. **`Host`.** rubevy implements the VM's `Host` trait: `compile` with `sabiruby-compiler`
    (a feature; web builds ship `.mrb`), `read_file` from Bevy assets, the clock from
    `Time`, randomness from Bevy's RNG. `.rb` files become assets and `require` works

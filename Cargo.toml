@@ -6,13 +6,20 @@ license = "MIT"
 description = "Run mruby bytecode (via SabiRuby) inside Bevy"
 keywords = ["bevy", "mruby", "ruby", "scripting"]
 
+[features]
+default = []
+# `require` of a `.rb` file, which needs the reference compiler (a C build). Without it a script
+# may still `require` a `.mrb`.
+ruby-source = ["dep:sabiruby-compiler"]
+
 [dependencies]
-# https://crates.io/crates/sabiruby. To build against a local checkout instead, put
-#   paths = ["../sabiruby"]
-# into .cargo/config.toml (ignored by git).
-sabiruby = "0.1"
+# https://crates.io/crates/sabiruby. The path is what a checkout next to this one builds
+# against; cargo uses the version when this crate is published.
+sabiruby = { version = "0.2", path = "../sabiruby" }
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
+# only for the `ruby-source` feature
+sabiruby-compiler = { version = "0.1", path = "../sabiruby/compiler", features = ["host"], optional = true }
 
 [dev-dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }

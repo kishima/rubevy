@@ -2207,6 +2207,7 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "sabiruby",
+ "sabiruby-compiler",
  "thiserror 2.0.20",
 ]
 
@@ -2253,12 +2254,19 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sabiruby"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd34352f776b2e60dfd424209f99632af5f23cf46d0f95fb30d966478edef376"
+version = "0.2.0"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
+ "regex-automata",
+]
+
+[[package]]
+name = "sabiruby-compiler"
+version = "0.1.1"
+dependencies = [
+ "cc",
+ "sabiruby",
 ]
 
 [[package]]
