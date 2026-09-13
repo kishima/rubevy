@@ -97,3 +97,15 @@ sabiruby-compiler = { path = "../sabiruby/compiler" }
 source (file and line — while it waits as well as while it runs), and whether it is finished.
 It is what makes a panel like "Scout — robots/scout.rb:12 — 4,200 insn" possible, which is the
 thing this VM can show and an engine's usual scripting cannot.
+
+## Replacing and removing a script
+
+A game reloads a script by removing the entity's `ScriptTask` and inserting a new `Script`, and
+ends one by despawning the entity. Either way `ScriptTask`'s `on_remove` hook terminates the task
+in the VM (`Task#terminate`) and lets the collector have it.
+
+Before that hook the task was only forgotten by the ECS: it stayed in the scheduler's queues and
+kept running, still carrying its entity, so a reloaded robot had two brains asking for the same
+body — the old one invisible, since nothing showed it any more. `tests/replace.rs` checks both
+paths (a question already asked when the script is replaced may still be answered once; no new
+one is asked).

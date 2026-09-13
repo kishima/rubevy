@@ -99,7 +99,11 @@ impl Script {
 }
 
 /// The task a [`Script`] became. Added by the plugin once the asset arrives.
+///
+/// Removing it (or despawning the entity) stops the task: it is terminated in the VM, so a script
+/// replaced by a new [`Script`] — a reload, a restart — does not keep running beside the new one.
 #[derive(Component, Debug, Clone, Copy)]
+#[component(on_remove = stop_removed_task)]
 pub struct ScriptTask {
     task: ObjId,
 }
@@ -109,6 +113,14 @@ impl ScriptTask {
     pub fn task(&self) -> ObjId {
         self.task
     }
+}
+
+fn stop_removed_task(mut world: bevy::ecs::world::DeferredWorld, context: bevy::ecs::lifecycle::HookContext) {
+    let Some(task) = world.get::<ScriptTask>(context.entity).map(|t| t.task) else { return };
+    // a script that ended has been let go of already (`ScriptDone`)
+    let ended = world.get::<ScriptDone>(context.entity).is_some();
+    let Some(mut scripts) = world.get_resource_mut::<ScriptWorld>() else { return };
+    scripts.stop_task(task, !ended);
 }
 
 /// What a host can show of a running script (`ScriptWorld::stats`).
@@ -268,6 +280,20 @@ impl ScriptWorld {
             location: self.vm.task_location(script.task),
             frames: self.vm.task_frames(script.task),
             finished: self.vm.task_finished(script.task),
+        }
+    }
+
+    /// Terminates a task that is still running and, where `release`, lets the collector have it.
+    fn stop_task(&mut self, task: ObjId, release: bool) {
+        if !self.vm.task_finished(task) {
+            let terminate = self.vm.intern("terminate");
+            if let Err(e) = self.vm.funcall(Value::Obj(task), terminate, &[], Value::Nil) {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: could not stop a script: {message}");
+            }
+        }
+        if release {
+            self.vm.gc_unregister(task);
         }
     }
 

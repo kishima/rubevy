@@ -27,3 +27,5 @@ sabiruby-compiler = { git = "https://github.com/kishima/sabiruby", features = ["
 
 [dev-dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }
+# the tests compile their Ruby in process
+sabiruby-compiler = { git = "https://github.com/kishima/sabiruby", features = ["host"] }
