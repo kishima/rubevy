@@ -120,6 +120,10 @@ pub struct ScriptStats {
     /// Where it stands in its own source: file and line, while it waits as well as while it
     /// runs. `None` where the program carries no debug info.
     pub location: Option<(String, u32)>,
+    /// Every frame it stands in, innermost first. A script parked inside a library method (a
+    /// DSL, `sleep`) stands in the library; this is how a panel finds the line of the script's
+    /// own file that is waiting.
+    pub frames: Vec<(String, u32)>,
     /// Whether the task has run to its end.
     pub finished: bool,
 }
@@ -223,6 +227,7 @@ impl ScriptWorld {
         ScriptStats {
             instructions: self.vm.task_instructions(script.task),
             location: self.vm.task_location(script.task),
+            frames: self.vm.task_frames(script.task),
             finished: self.vm.task_finished(script.task),
         }
     }
