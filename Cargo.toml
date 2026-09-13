@@ -19,11 +19,11 @@ ruby-source = ["dep:sabiruby-compiler"]
 #   [patch.crates-io]
 #   sabiruby = { path = "../sabiruby" }
 #   sabiruby-compiler = { path = "../sabiruby/compiler" }
-sabiruby = "0.3"
+sabiruby = "0.4"
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
 # only for the `ruby-source` feature
-sabiruby-compiler = { version = "0.2", features = ["host"], optional = true }
+sabiruby-compiler = { version = "0.2.1", features = ["host"], optional = true }
 
 [dev-dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }

@@ -75,9 +75,10 @@ one script from eating a frame — a script that never sleeps is preempted and r
 
 ## Building against the VM
 
-`Cargo.toml` names the published `sabiruby`. While the plugin uses VM features newer than the
-published version (`Vm::task_queue_new` / `task_queue_push` as of 2026-09-13), build against a
-checkout of the VM next to this repository with a git-ignored `.cargo/config.toml`:
+`Cargo.toml` names the published `sabiruby` (0.4, which has `Vm::task_queue_new` /
+`task_queue_push`), so a clone of this repository alone builds. To work against a checkout of the
+VM next to this one, redirect it in a git-ignored `.cargo/config.toml` instead of editing
+`Cargo.toml`:
 
 ```toml
 [patch.crates-io]
