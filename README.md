@@ -32,8 +32,15 @@ reflection bridge (`docs/outlook.md`).
 
 ## Try it
 
-`Cargo.toml` points at a checkout of `kishima/sabiruby` next to this repository and at the
-`sabiruby` crate for a published build.
+The VM comes from crates.io (`sabiruby` 0.3), so a clone of this repository alone builds. To
+work against a checkout of `kishima/sabiruby` next to this one, redirect it in
+`.cargo/config.toml` (git-ignored) instead of editing `Cargo.toml`:
+
+```toml
+[patch.crates-io]
+sabiruby = { path = "../sabiruby" }
+sabiruby-compiler = { path = "../sabiruby/compiler" }
+```
 
 ```
 tools/compile_scripts.sh          # assets/scripts/*.rb -> .mrb (Docker, reference mrbc)

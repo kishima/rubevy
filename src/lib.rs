@@ -104,6 +104,12 @@ pub struct ScriptTask {
     task: ObjId,
 }
 
+/// Marks an entity whose script has ended, so that [`ScriptEnded`] is sent once and the task
+/// is let go of once. The [`ScriptTask`] stays, which is what keeps the script from starting
+/// again.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ScriptDone;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptStatus {
     Finished,
@@ -290,8 +296,9 @@ fn tick_scripts(
     time: Res<Time>,
     frame: Res<FrameCount>,
     mut world: ResMut<ScriptWorld>,
-    tasks: Query<(Entity, &ScriptTask)>,
+    tasks: Query<(Entity, &ScriptTask), Without<ScriptDone>>,
     mut ended: MessageWriter<ScriptEnded>,
+    mut commands: Commands,
 ) {
     let delta = time.delta_secs();
     let elapsed = time.elapsed_secs();
@@ -325,6 +332,7 @@ fn tick_scripts(
         let text = world.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
         ended.write(ScriptEnded { entity, status, value: text });
         world.vm.gc_unregister(st.task);
+        commands.entity(entity).insert(ScriptDone);
     }
 }
 
