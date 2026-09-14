@@ -76,6 +76,24 @@ is in the run without asking.
 second later. What still comes from the instruction count is the timeslice, which is what keeps
 one script from eating a frame — a script that never sleeps is preempted and resumed next frame.
 
+The instruction count cannot stop everything, so each frame also runs under time limits
+(`Vm::task_run_limits`, on a clock the plugin gives the VM — Bevy's `Instant`, which a browser
+has too):
+
+| `ScriptWorld` field | default | what it does |
+|---|---|---|
+| `budget` | 200,000 instructions | checked between timeslices, as before |
+| `frame_time` | 8 ms | the running timeslice is cut short once the frame's scripts have taken this long |
+| `overrun` | 50 ms | a script that cannot be switched out — inside a native waiting for a block, `sort { }` or `Array.new(1) { loop { } }` — gets `Task::Overrun` past this, and the frame comes back |
+
+`Task::Overrun` is an `Exception`, not a `StandardError`, so a script's `rescue => e` does not
+keep it going; the script ends with it (`ScriptEnded { status: Failed }`). Timeslices themselves
+stay counted in instructions, so what a script does is the same on every machine; the clock only
+bounds a frame. A single native that takes long (reversing a 20 MB string) is not interrupted and
+is noticed after it returns. `tests/replace.rs` checks that a stuck script no longer holds the
+frame (without `overrun`, that test never finishes). The VM side is written up in SabiRuby's
+`docs/gems.md`, mruby-task, "Time limits".
+
 ## Building against the VM
 
 `Cargo.toml` names the VM from git while the entry points this plugin needs are still being added

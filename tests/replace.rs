@@ -49,12 +49,13 @@ fn frames(app: &mut App, n: usize) {
     }
 }
 
-// One test, not two: the queue between natives and systems is a static, so two apps running in
+// One test, not three: the queue between natives and systems is a static, so two apps running in
 // parallel test threads would take each other's requests.
 #[test]
 fn a_script_whose_task_is_removed_stops() {
     a_replaced_script_stops();
     a_despawned_script_stops();
+    a_script_stuck_under_a_native_does_not_hold_the_frame();
 }
 
 fn a_replaced_script_stops() {
@@ -95,4 +96,27 @@ fn a_despawned_script_stops() {
     let before = app.world().resource::<Seen>().old;
     frames(&mut app, 20);
     assert_eq!(app.world().resource::<Seen>().old, before, "the despawned script keeps asking");
+}
+
+fn a_script_stuck_under_a_native_does_not_hold_the_frame() {
+    // `Array.new(1) { loop { } }` cannot be switched out: the block runs under a native. With
+    // the plugin's limits the frame comes back, the script ends with Task::Overrun, and the
+    // other script keeps running.
+    let mut app = app();
+    let (stuck, busy) = {
+        let mut assets = app.world_mut().resource_mut::<Assets<MrbAsset>>();
+        (
+            assets.add(compile("Array.new(1) { loop { } }")),
+            assets.add(compile("loop { Rubevy.ask('new').pop }")),
+        )
+    };
+    app.world_mut().resource_mut::<ScriptWorld>().overrun = Some(Duration::from_millis(20));
+    app.world_mut().spawn(Script::new(stuck));
+    app.world_mut().spawn(Script::new(busy));
+    let started = std::time::Instant::now();
+    frames(&mut app, 5);
+    assert!(started.elapsed() < Duration::from_secs(2), "the frames came back: {:?}", started.elapsed());
+    let asked = app.world().resource::<Seen>().new;
+    frames(&mut app, 5);
+    assert!(app.world().resource::<Seen>().new > asked, "the other script keeps running");
 }

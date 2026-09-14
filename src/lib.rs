@@ -251,6 +251,13 @@ pub struct ScriptWorld {
     pub vm: Vm,
     /// Instructions the scheduler may spend per frame, over all tasks.
     pub budget: u64,
+    /// Time the scripts may take per frame, on the VM's clock (Bevy's `Instant`). The running
+    /// timeslice is cut short when it is up. `None`: instructions only.
+    pub frame_time: Option<std::time::Duration>,
+    /// Past this, a script that cannot be switched out — it is inside a native waiting for a
+    /// block, `sort { }` or `Array.new { loop { } }` — gets `Task::Overrun` rather than holding
+    /// the frame. `None`: no such limit.
+    pub overrun: Option<std::time::Duration>,
     /// Ticks not yet handed to the scheduler (frame times shorter than a tick).
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
@@ -269,7 +276,18 @@ impl ScriptWorld {
             return Err(format!("GC.scheduler_driven: {e}"));
         }
         install_host_api(&mut vm);
-        Ok(ScriptWorld { vm, budget: 200_000, tick_remainder: 0.0, requests: Vec::new() })
+        // a clock for the time limits (`frame_time`, `overrun`). Timeslices stay counted in
+        // instructions, so what a script does is the same on every machine; the clock only keeps a
+        // frame from being lost to one that the count cannot stop
+        vm.task_set_clock(Some(clock_ns));
+        Ok(ScriptWorld {
+            vm,
+            budget: 200_000,
+            frame_time: Some(std::time::Duration::from_millis(8)),
+            overrun: Some(std::time::Duration::from_millis(50)),
+            tick_remainder: 0.0,
+            requests: Vec::new(),
+        })
     }
 
     /// What a script has spent and where it is, for a HUD or a debugger panel. The task comes
@@ -333,6 +351,12 @@ impl ScriptWorld {
         }
         self.vm.gc_unregister(request.queue);
     }
+}
+
+/// Nanoseconds since the first call, on Bevy's `Instant` (which is also there in a browser).
+fn clock_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<bevy::platform::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(bevy::platform::time::Instant::now).elapsed().as_nanos() as u64
 }
 
 fn enable_scheduler_gc(vm: &mut Vm) -> Result<(), String> {
@@ -483,8 +507,13 @@ fn tick_scripts(
     }
 
     set_frame_state(&mut world.vm, frame_no, delta, elapsed);
-    let budget = world.budget;
-    if let Err(e) = world.vm.task_run_budget(budget) {
+    let limits = sabiruby::RunLimits {
+        instructions: Some(world.budget),
+        time_ns: world.frame_time.map(|d| d.as_nanos() as u64),
+        overrun_ns: world.overrun.map(|d| d.as_nanos() as u64),
+        ..Default::default()
+    };
+    if let Err(e) = world.vm.task_run_limits(limits) {
         // the scheduler itself failed, which a task's own exception never does
         let message = world.vm.describe_error(&e);
         error!("rubevy: the scheduler raised: {message}");
