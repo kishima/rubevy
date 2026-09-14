@@ -109,3 +109,9 @@ kept running, still carrying its entity, so a reloaded robot had two brains aski
 body — the old one invisible, since nothing showed it any more. `tests/replace.rs` checks both
 paths (a question already asked when the script is replaced may still be answered once; no new
 one is asked).
+
+## Further reading
+
+`rust-bridge.ja.md` walks through one question from a robot in SabiRuby Battle to the system that
+answers it and back, and compares each step with what embedding the C mruby would take (in
+Japanese).

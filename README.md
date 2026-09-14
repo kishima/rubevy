@@ -30,6 +30,10 @@ that needs isolation wants a second VM, which this plugin does not build yet.
 Not yet: reading components other than the ones above, events, hot reload, the
 reflection bridge (`docs/outlook.md`).
 
+How a script and the game actually meet — `Rubevy.ask`, answering from a system, the clock, reading
+where a script stands, stopping it — and what that gains over embedding the C mruby, is written up
+in Japanese in [`docs/rust-bridge.ja.md`](docs/rust-bridge.ja.md).
+
 ## Try it
 
 The VM comes from crates.io (`sabiruby` 0.3), so a clone of this repository alone builds. To
