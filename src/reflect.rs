@@ -129,13 +129,11 @@ fn read_at(vm: &mut Vm, v: Value, entity_tag: u32, depth: usize) -> Result<RubyD
                 }
                 return Ok(RubyData::List(out));
             }
-            if vm.obj_is_kind_of(other, vm.core.hash) {
-                // The VM has `hash_new`, `hash_set` and `hash_get` but no way to walk a Hash
-                // from Rust, so the keys come back through Ruby's own `keys` — which is what a
-                // native may do (it returns at once; nothing here waits).
-                let keys = vm.intern("keys");
-                let keys = vm.funcall(other, keys, &[], Value::Nil)?;
-                let keys = vm.ary_vals(keys).unwrap_or_default();
+            if let Some(keys) = vm.hash_keys(other) {
+                // `Vm::hash_keys` walks the Hash's own entries in insertion order. It used to be
+                // Ruby's `keys` through `funcall`, because the VM had `hash_new`, `hash_set` and
+                // `hash_get` but no way to read a Hash out from Rust; the send also built an
+                // Array on the Ruby heap for this loop to read once and drop.
                 let mut out = Vec::with_capacity(keys.len());
                 for k in keys {
                     let value = vm.hash_get(other, k).unwrap_or(Value::Nil);

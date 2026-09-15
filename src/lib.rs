@@ -773,21 +773,24 @@ impl ScriptWorld {
     pub const QUEUE_LIMIT: usize = 64;
 
     /// Drops the oldest messages until there is room for one more.
+    ///
+    /// This runs on every published message, so it asks the VM rather than the script's Ruby:
+    /// `Vm::task_queue_len` and `Vm::task_queue_try_pop` read the queue's own Array, where
+    /// `size` and `__pop_try(true)` each put a call on the stack to do the same thing.
     fn make_room(&mut self, queue: ObjId) {
-        let size = self.vm.intern("size");
-        // `Task::Queue` has no non-blocking pop on the Rust side, so the two are Ruby's own
-        // (`__pop_try(true)` answers the item where there is one, and there is one here)
-        let pop = self.vm.intern("__pop_try");
         loop {
-            let n = match self.vm.funcall(Value::Obj(queue), size, &[], Value::Nil) {
-                Ok(Value::Int(n)) => n as usize,
-                _ => return,
+            let n = match self.vm.task_queue_len(queue) {
+                Ok(n) => n,
+                Err(_) => return,
             };
             if n < Self::QUEUE_LIMIT {
                 return;
             }
-            if self.vm.funcall(Value::Obj(queue), pop, &[Value::True], Value::Nil).is_err() {
-                return;
+            // `None` is an empty queue, which cannot happen while `n >= QUEUE_LIMIT`; stopping
+            // on it is what keeps this loop finite whatever the queue turns out to be
+            match self.vm.task_queue_try_pop(queue) {
+                Ok(Some(_)) => {}
+                _ => return,
             }
         }
     }
