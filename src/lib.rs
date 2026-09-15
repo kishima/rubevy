@@ -1526,16 +1526,15 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         };
         // A subscription belongs to an entity's script: that is who a message addressed to an
         // entity reaches, and it is what says when to let the queue go. A task a script made
-        // with `Task.new` carries no entity, so it subscribes through the script that made it
-        // and shares the queue — which is the shape the waiting task wants anyway.
+        // with `Task.new` has the entity of the task that made it (`src/prelude.rb`), so it may
+        // subscribe for itself; what is left here is a task with no entity at all — one the
+        // host spawned outside a `Script`, or one whose `@rubevy_entity` was cleared.
         let entity = match current_entity(vm) {
             Value::Int(bits) => entity_from_bits(bits as u64),
             _ => None,
         };
         let Some(entity) = entity else {
-            return Err(vm.raise_arg(
-                "subscribe from the script's own task (a Task.new task has no entity)",
-            ));
+            return Err(vm.raise_arg("subscribe from a task that has an entity (@rubevy_entity)"));
         };
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);

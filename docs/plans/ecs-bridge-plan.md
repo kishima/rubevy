@@ -77,7 +77,24 @@ end
 **確認**: `cargo test --workspace`、examples、docs（`host-api.md` に 2 節、`README.md`、`docs/README.md`、`rust-bridge.ja.md` の該当箇所、`outlook.md`/`outlook.ja.md` の
 「ECS の橋」と「イベント」の状態）。ベンチ不要。
 
+## 続き（2026-09-16、ブランチ `bridge-followups`）
+
+A と B が終わったあと、sabiruby の `docs/worklog/2026-09-16-leftovers.md`（項目 8 の rubevy 側）と
+rubevy_games の `docs/worklog/2026-09-16-reflex.md`（この橋の上に reflex を載せて分かったこと）が
+3 つ残していった。どれもこの計画の穴埋めなので、ここに続きとして記録する。
+
+| # | 内容 | 状態 |
+|---|---|---|
+| 続 1 | `funcall` で代用していた 3 か所を VM の入り口へ（`hash_keys`、`task_queue_len`、`task_queue_try_pop`）。`make_room` は publish のたびに回るので、毎回の Ruby 呼び出しが 2 本消える | **済み**（2026-09-16、`83cd763`。VM は `11bcaa0` で main `1ae258f` に） |
+| 続 2 | `Task.new` で作ったタスクが、作った側のエンティティを引き継ぐ（`Rubevy.ask`／`subscribe`／`entity` がその中で使える） | **済み**（2026-09-16、`bf83076`）。VM に親を持たせず、`src/prelude.rb` の `Task.new` で写す |
+| 続 3 | 購読解除でキューを `close` し、待っている `pop` に `Rubevy::Unsubscribed` を上げる（待っていたタスクの `ensure` が走り、タスクが終わる） | **済み**（2026-09-16、`9030fae`） |
+
+続 2 と続 3 は、reflex の worklog が「ゲーム側で手で回避した」と書いていたもの
+（`@rubevy_entity` を手で写す、倒れた機体の `Scout-hit` が `WAITING` のまま残る）で、
+rubevy が引き受けたので rubevy_games 側の回避は外せる。
+
 ## 記録
 
-* 過程は `docs/worklog/2026-09-15-ecs-bridge.md`（A）と `2026-09-15-events.md`（B）。
+* 過程は `docs/worklog/2026-09-15-ecs-bridge.md`（A）と `2026-09-15-events.md`（B）、
+  続きは `docs/worklog/2026-09-16-bridge-followups.md`。
 * 終わったらこの文書の「状況」を本体が更新する。

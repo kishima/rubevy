@@ -25,3 +25,4 @@ The worklog, newest last:
 | [worklog/2026-09-15-events.md](worklog/2026-09-15-events.md) | events as queues: where a subscription is let go of, the 64-message limit, and the two tests that were racing the schedule |
 | [worklog/2026-09-15-entity-index.md](worklog/2026-09-15-entity-index.md) | `e[:Transform]` once the VM stopped putting a boundary around `OP_GETIDX`: what changed in sabiruby, and why `get` stayed |
 | [worklog/2026-09-16-arg-value.md](worklog/2026-09-16-arg-value.md) | a Hash or an Array as an argument of `Rubevy.ask`: why the value travels rather than a copy of it, and the two-step release that a `Drop` without a `Vm` needs |
+| [worklog/2026-09-16-bridge-followups.md](worklog/2026-09-16-bridge-followups.md) | the three the bridge left behind: `funcall` replaced by the VM's own entry points, a `Task.new` task carrying the script's entity, and the closed queue that ends a waiting task |

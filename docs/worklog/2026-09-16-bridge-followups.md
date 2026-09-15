@@ -175,3 +175,41 @@ rubevy 側のテストは `tests/events.rs` に 2 本:
   自分の終わり方を決められること、閉じる前に積まれていた 1 件を読んでから終わること。
 
 `close` の送信だけを外して同じテストを回すと 2 本とも落ちる（起きないので ensure も rescue も走らない）。
+
+## 4. 文書と、rubevy_games 側に戻せること
+
+`docs/host-api.md` の Events の節に 2 つ書いた。`Task.new` のタスクが作った側のエンティティを持つこと
+（ivar の名前と、別のエンティティとして振る舞わせたいときは自分で書けること）と、
+購読が終わるときにキューが閉じて `Rubevy::Unsubscribed` が上がること（`rescue` / `ensure` の形、
+残っていた分が先に読めること、`Rubevy.ask` のキューは素の `Task::Queue` のままであること）。
+
+`src/lib.rs` の `subscribe` ネイティブのコメントと、エンティティが無いときの文言も直した。
+前は「a Task.new task has no entity」と言っていたが、いまそれは正しくない。
+残るのは本当にエンティティを持たないタスク（`Script` の外でホストが spawn した、ivar を消した）だけなので、
+`subscribe from a task that has an entity (@rubevy_entity)` にした。
+
+`docs/plans/ecs-bridge-plan.md` に「続き」の表（続 1〜3、コミット付き）、`docs/README.md` に worklog の行。
+
+**rubevy_games 側で外せるもの。** reflex の worklog が「本当は rubevy がやるべき」と書いていた 2 つは、
+これで rubevy が引き受けた。
+
+* `prelude.rb:248` と `:268` の `@rubevy_entity` の手写しは**外せる**。`Task.new` が写すようになった。
+* 倒れた機体の `Scout-hit` が `WAITING` のまま残る件は**直った**。`ScriptTask` が外れると
+  rubevy が購読を閉じ、`hits.pop` が `Rubevy::Unsubscribed` を上げるので、
+  reflex のタスクは `ensure` を通って終わる。`docs/sabiruby-battle.md` の「まだやっていないこと」から外せる。
+  ただしゲーム側の reflex のループが `loop { hits.pop }` のままだと、例外はタスクの結果になるだけで
+  ログには出ない。終わりを見せたいなら `rescue Rubevy::Unsubscribed` を書く。
+* `REFLEX_SLOTS`（`define_method("__reflex_#{slot}")` と `case` で呼ぶ仕掛け）は**外せない**。
+  あれはエンティティの話ではなく、`instance_exec` が VM の入れ子の実行ループになって
+  その中で `pop` が park できないという別の理由でそうなっている。今回の 3 つは何も変えていない。
+
+## 確認
+
+* `cargo test --workspace`: 41 通過（0 失敗）。内訳は `ask_value` 4、`child_task` 3（新規）、
+  `components` 6、`entity` 3、`events` 10（+2）、`futures` 2、`proxy` 4、`replace` 3、doctest 6。
+* `cargo build --examples` 通る。`cargo doc --no-deps` 警告 0。
+* `cargo clippy --all-targets` は 2 件警告が出るが、どちらも触っていない場所
+  （`drain_commands` の `SetPosition` の入れ子の `if let`、`examples/headless.rs` の Query の型）で、
+  この作業の前からあるもの。範囲外なので直していない。
+* prelude の `.mrb` は `docker run kishima/mruby:4.1.0-rc mrbc`（`tools/compile_scripts.sh` と同じ）で
+  作り直した。`assets/scripts/*.mrb` は触っていない。

@@ -280,9 +280,13 @@ end
 ```
 
 A reflex is then not a callback that interrupts the brain; it is another task that happens to be
-ready. Subscribe in the script's own task — a task made with `Task.new` has no entity, so it
-cannot be subscribed for (rubevy raises rather than making a queue nothing will ever close) —
-and share the queue with the tasks that read it, as above.
+ready — and it is the script's task in every way that matters here: **a task made with
+`Task.new` carries the entity of the task that made it**, so it may `Rubevy.subscribe`,
+`Rubevy.ask` and `Rubevy.entity` for itself. (The entity is an ordinary instance variable on the
+task, `@rubevy_entity`, and the prelude copies it in `Task.new`, where the task doing the making
+is still the one running. A task that should act for another entity sets it itself.) Subscribing
+in the script's own task and sharing the queue, as above, is still the clearer shape when
+several tasks read one stream.
 
 The game publishes:
 
@@ -318,6 +322,32 @@ a script (`assets/scripts/events.rb`) with a brain and a reflex.
   (a reload, a despawn). A script that runs off its end keeps its `ScriptTask` — that is what
   stops it starting again — so both places matter. `ScriptWorld::subscriptions()` says how many
   are standing.
+* **The queue is closed when the subscription goes, and a `pop` waiting on it raises
+  `Rubevy::Unsubscribed`.** The script's own task is terminated with its `ScriptTask`, but a
+  task it made with `Task.new` is not: parked on a message that will never come, it would stand
+  there for as long as the VM lives, holding its context and everything its block closed over,
+  and its `ensure` would never run. The raise unwinds it instead:
+
+  ```ruby
+  Task.new(name: "reflex") do
+    begin
+      loop { handle(hits.pop) }
+    rescue Rubevy::Unsubscribed        # the script is going; end on our own terms
+      Rubevy.log "reflex off"
+    ensure
+      release_the_wheel                # this runs either way
+    end
+  end
+  ```
+
+  Whatever was already in the queue is popped first, so a script that was behind still reads
+  what it missed before it hears the end. An unrescued `Rubevy::Unsubscribed` simply becomes
+  that task's result, as any unhandled exception in a task does; nothing else stops.
+
+  It is the subscription's queue that says this, not every queue: `Rubevy.subscribe` extends the
+  one it answers with `Rubevy::Subscription` (`pop`, `shift`, `deq`). A queue from `Rubevy.ask`
+  is an ordinary `Task::Queue` and keeps mruby-task's own meaning, where a closed queue answers
+  `pop` with nil.
 
 ## A dynamic proxy (`Rubevy::Proxy`)
 
