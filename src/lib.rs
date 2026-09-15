@@ -17,7 +17,7 @@
 //!   `Rubevy.move_to` — these do not touch the Bevy world from inside the VM
 //!   (a native cannot); they put a command on a queue that a system drains
 //!   after the frame's scripts have run.
-//! * **Components by name**: `entity.get(:Transform)` answers a Hash of its
+//! * **Components by name**: `entity[:Transform]` answers a Hash of its
 //!   fields, `entity[:Transform] = hash` writes back the fields the Hash names,
 //!   and `entity.has?`, `entity.components` and `Rubevy.find(:Npc)` say what is
 //!   where. It goes through Bevy's reflection, so no type is named in rubevy —

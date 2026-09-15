@@ -17,7 +17,7 @@
 | 5. 何千もの小さな心 | **できた** | 1 つの VM にスクリプトごとのタスク。SabiRuby Battle で実際に使っている |
 | 6. 機械を見ながら学ぶ | **できた（Playground）** | ブラウザで 1 命令ずつ VM の中を見られる。ゲーム側はどの行で考えているかの表示まで |
 | 7. CRuby で試作して、Bevy で出す | 変わらず | 仕組みとしては可能。道具立てはまだ |
-| ECS のエンティティを Ruby のオブジェクトに | **できた**（2026-09-15） | 書き込みをまとめて反映する段、質問して答えを待つ形（`Rubevy.ask`）、`Entity` を包む `Rubevy::Entity`、そしてリフレクションでコンポーネントに名前で触る段（`e.get(:Transform)`）。残るのはクエリをブロックで書く形 |
+| ECS のエンティティを Ruby のオブジェクトに | **できた**（2026-09-15） | 書き込みをまとめて反映する段、質問して答えを待つ形（`Rubevy.ask`）、`Entity` を包む `Rubevy::Entity`、そしてリフレクションでコンポーネントに名前で触る段（`e[:Transform]`）。残るのはクエリをブロックで書く形 |
 | Bevy のイベントを Ruby に届ける | **できた**（2026-09-15） | `Rubevy.subscribe(:hit)` がキューを返し、ゲームは observer を 1 行書く。待ち方は `ask` の答えを待つのと同じ |
 
 ## どうしてこういう夢が描けるのか
@@ -168,7 +168,7 @@ Playground のために作るビジュアライザ（レジスタ、フレーム
 
 ```ruby
 e = Rubevy.entity
-tf = e.get(:Transform)          # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
+tf = e[:Transform]              # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
 tf[:translation][0] += 1.0
 e[:Transform] = tf              # 名前の挙がったフィールドだけ、フレームの終わりに反映
 e.has?(:Velocity)               # true / false
@@ -176,9 +176,10 @@ e.components                    # ["Transform", "Sprite", ...]
 Rubevy.find(:Npc)               # そのコンポーネントを持つエンティティの配列
 ```
 
-読みが `e[:Transform]` ではなく `e.get(:Transform)` なのは、mrbc が引数 1 個の `[]` を `OP_GETIDX` に
-畳み、VM がそれを入れ子の実行ループで回すためです。入れ子の中ではタスクを待たせられないので、
-答えを待つ読みは普通のメソッド呼び出しである必要があります（`docs/worklog/2026-09-15-ecs-bridge.md`）。
+最初は読みを `e.get(:Transform)` にしていました。mrbc が引数 1 個の `[]` を `OP_GETIDX` に畳み、
+VM がそれを入れ子の実行ループで回していて、入れ子の中ではタスクを待たせられなかったからです。
+VM を本家と同じ形（普通の送信）に直したので、いまは `[]` で書けます（`get` も残してあります。
+`docs/worklog/2026-09-15-ecs-bridge.md`、`2026-09-15-entity-index.md`）。
 まだ無いのは、コンポーネントを組み立てて渡す形（`spawn(Sprite.new(...))`）と、クエリをブロックで書く形
 （`each(:Enemy, :Transform) { |enemy, tf| ... }`）です。
 

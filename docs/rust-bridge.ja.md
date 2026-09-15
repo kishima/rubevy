@@ -344,7 +344,7 @@ SabiRuby で同じ種類の間違いをすると、多くはコンパイルが�
   `act` が操作をまとめて送るのはこの遅れを減らすため。
 - ~~**ECS の橋はまだ。**~~ **済み**（2026-09-15）。エンティティを Ruby のオブジェクトとして包む段
   （上の `Rubevy::Entity`）に続いて、Bevy のリフレクションでコンポーネントに名前で触る段ができた。
-  `e.get(:Transform)` がフィールドの Hash を返し、`e[:Transform] = tf` が名前の挙がったフィールドだけを
+  `e[:Transform]` がフィールドの Hash を返し、`e[:Transform] = tf` が名前の挙がったフィールドだけを
   後から書き、`e.has?` / `e.components` / `Rubevy.find(:Npc)` がどこに何があるかを答える。
   rubevy のコードはどの型の名前も知らない: 型登録（`app.register_type::<T>()`）にあるものを
   `ReflectComponent` でたどるだけなので、ゲーム自身のコンポーネントも同じように見える

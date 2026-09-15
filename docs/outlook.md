@@ -21,7 +21,7 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 | bridge 1 | `Host` | **partly**: `compile` (feature `ruby-source`) and `read_file` from the asset directory; the scheduler's clock from Bevy. Randomness is the VM's own (fixed seed or `srand`), not Bevy's RNG |
 | bridge 2 | hot reload | **in the restart form**: a script is replaced by removing its `ScriptTask` and inserting a new `Script` (the old task is terminated). SabiRuby Battle reloads on file save and applies editor text in memory. Redefining methods in place is not done |
 | bridge 3 | ECS bridge | **done**: deferred writes, `Rubevy.ask` (request/answer, not in the original list), `Rubevy::Entity` as a `Data` object, and components by name |
-| bridge 4 | reflection | **done**: `e.get(:Transform)`, `e[:X] = hash`, `has?`, `components`, `Rubevy.find` — through `ReflectComponent`, with no glue per type |
+| bridge 4 | reflection | **done**: `e[:Transform]`, `e[:X] = hash`, `has?`, `components`, `Rubevy.find` — through `ReflectComponent`, with no glue per type |
 | bridge 5 | coroutine-style scripts | **done in task form** (`sleep`, waiting on `ask(...).pop`) |
 | bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14 |
 | bridge 7 | events | **done in queue form**: `Rubevy.subscribe(:hit)` answers a queue a game `publish`es onto, read in the script's own task or in one it made. No Ruby blocks as callbacks, and no `ScriptError` |
@@ -76,16 +76,18 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    types are known at run time, so Ruby can do `entity[:Transform].translation.x = 1.0`
    without hand-written bindings. Ruby's dynamic access and Bevy's reflection are the same
    idea from two sides — the strongest fit.
-   *Now:* done (2026-09-15), in the shape the VM allows. `e.get(:Transform)` answers a Hash of
+   *Now:* done (2026-09-15). `e[:Transform]` answers a Hash of
    the component's fields (`glam` vectors as Arrays, enums as the variant's Symbol),
    `e[:Transform] = hash` writes back the fields the Hash names and leaves the rest, and
    `e.has?`, `e.components` and `Rubevy.find(:Npc)` say what is where. Nothing per type is
    written in rubevy: `src/reflect.rs` walks whatever `ReflectComponent` and the type registry
    hold, so a game's own component joins in with a derive and a `register_type`. A read is one
    question and one frame — `Rubevy.ask` under a nicer name — so it is for declaration time and
-   for events, not for a dozen reads a frame. It is `get` and not `[]` because mrbc folds a
-   one-argument `[]` into OP_GETIDX, which the VM dispatches through a nested run loop that a
-   task cannot be parked across (`docs/worklog/2026-09-15-ecs-bridge.md`).
+   for events, not for a dozen reads a frame. The read was `e.get(:Transform)` at first, because
+   mrbc folds a one-argument `[]` into OP_GETIDX and the VM dispatched that through a nested run
+   loop a task cannot be parked across; the VM now sends it in the caller's frame, as the
+   reference does, so `[]` is the spelling and `get` is still there
+   (`docs/worklog/2026-09-15-ecs-bridge.md`, `2026-09-15-entity-index.md`).
 5. **Coroutine-style scripts.** Fibers give `sleep 0.5`, `wait_until { }`, `move_to(x, y)`
    that span frames (the feel of Unity coroutines / Godot `await`). The VM already has
    fibers and `step`; rubevy adds only "resume the yielded fiber next frame".
