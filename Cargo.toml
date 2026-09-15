@@ -26,6 +26,9 @@ thiserror = "2"
 sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"], optional = true }
 
 [dev-dependencies]
-bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }
+# `multi_threaded` is bevy's, not this crate's: it is what makes bevy's task pools threads, so
+# that `ScriptWorld::answer_with` in `examples/async.rs` and `tests/futures.rs` really works
+# beside the frames. The library itself does not ask for it (see `answer_with`'s rustdoc).
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11", "multi_threaded"] }
 # the tests compile their Ruby in process
 sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"] }

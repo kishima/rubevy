@@ -32,6 +32,7 @@ use bevy::asset::{io::Reader, Asset, AssetApp, AssetLoader, LoadContext};
 use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
+use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 
 use sabiruby::convert::{DataRef, This};
 use sabiruby::value::ObjId;
@@ -285,6 +286,9 @@ pub struct ScriptWorld {
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
     requests: Vec<Request>,
+    /// Answers still being worked out on Bevy's task pool ([`ScriptWorld::answer_with`]), each
+    /// with the request it belongs to. [`deliver_answers`] takes them off as they finish.
+    answering: Vec<(Request, Task<Answer>)>,
     /// The `Rubevy::Entity` class, for [`ScriptWorld::answer`] to build an [`Answer::Entity`]
     /// with. The natives carry it in their closures.
     entity_class: ObjId,
@@ -330,6 +334,7 @@ impl ScriptWorld {
             overrun: Some(std::time::Duration::from_millis(50)),
             tick_remainder: 0.0,
             requests: Vec::new(),
+            answering: Vec::new(),
             entity_class,
             freed_entities,
         })
@@ -403,6 +408,53 @@ impl ScriptWorld {
             error!("rubevy: could not answer {}: {message}", request.kind);
         }
         self.vm.gc_unregister(request.queue);
+    }
+
+    /// Answers a request with what a future works out: the future goes to Bevy's
+    /// [`AsyncComputeTaskPool`], and the plugin answers the request on the frame it finishes.
+    ///
+    /// The script sees nothing of this. It is parked on its queue from the `Rubevy.ask` until
+    /// the answer arrives, exactly as it is when a system of the game keeps the request and
+    /// answers it three frames later; the other scripts keep running meanwhile.
+    ///
+    /// ```no_run
+    /// # use rubevy::{Answer, ScriptWorld};
+    /// # use bevy::prelude::*;
+    /// fn answer_paths(mut world: ResMut<ScriptWorld>) {
+    ///     for request in world.take_requests() {
+    ///         let to = (request.num_or(0, 0.0), request.num_or(1, 0.0));
+    ///         world.answer_with(request, async move { Answer::List(vec![to.0, to.1]) });
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Take the [`Request`] from [`ScriptWorld::take_requests`] and hand it over as it is; it is
+    /// answered once, here, so do not answer it again yourself.
+    ///
+    /// **What the future runs on.** Bevy's task pools are threads only in a build with bevy's
+    /// `multi_threaded` feature. Without it they are a single-threaded fallback on the main
+    /// thread: a future that only computes is driven to its end inside this call, which holds
+    /// the frame, while a future waiting on something else (a channel, an IO completion, a
+    /// waker of your own) still parks and is picked up later. An app that wants the work off
+    /// the main thread enables `multi_threaded` on its own `bevy` dependency.
+    ///
+    /// # Panics
+    ///
+    /// If Bevy's task pools have not been set up — `TaskPoolPlugin`, which both `MinimalPlugins`
+    /// and `DefaultPlugins` add.
+    pub fn answer_with(
+        &mut self,
+        request: Request,
+        answer: impl Future<Output = Answer> + Send + 'static,
+    ) {
+        let task = AsyncComputeTaskPool::get().spawn(answer);
+        self.answering.push((request, task));
+    }
+
+    /// How many answers are being worked out on the task pool right now
+    /// ([`ScriptWorld::answer_with`]), for a HUD or a test.
+    pub fn answering(&self) -> usize {
+        self.answering.len()
     }
 }
 
@@ -504,7 +556,7 @@ impl Plugin for RubevyPlugin {
             .init_asset_loader::<MrbLoader>()
             .add_message::<ScriptEnded>()
             .insert_resource(world)
-            .add_systems(Update, (start_scripts, tick_scripts, drain_commands).chain());
+            .add_systems(Update, (start_scripts, deliver_answers, tick_scripts, drain_commands).chain());
     }
 }
 
@@ -616,6 +668,34 @@ fn flush_output(vm: &mut Vm) {
     }
     for line in String::from_utf8_lossy(&out).lines() {
         info!("[script] {line}");
+    }
+}
+
+/// Answers the requests whose futures have finished ([`ScriptWorld::answer_with`]).
+///
+/// It runs at the head of the frame, before [`tick_scripts`], rather than beside
+/// [`drain_commands`] at the end of it: a future finishes at whatever moment its thread is done,
+/// and most of a frame's wall clock is outside this schedule (the wait for the display). An
+/// answer that arrived in that gap is given to the VM before the scripts run, so the script that
+/// asked wakes on this frame instead of the next one. Nothing is lost the other way: a future
+/// that finishes later in this frame is picked up at the head of the next, which is where the
+/// script would have woken anyway.
+fn deliver_answers(mut world: ResMut<ScriptWorld>) {
+    if world.answering.is_empty() {
+        return;
+    }
+    let world = &mut *world;
+    let mut i = 0;
+    while i < world.answering.len() {
+        // `poll_once` on the pool's handle: the future itself is driven by the pool, and this
+        // only asks whether its answer is there yet (bevy's own way of reading a `Task`)
+        match block_on(poll_once(&mut world.answering[i].1)) {
+            Some(answer) => {
+                let (request, _finished) = world.answering.remove(i);
+                world.answer(&request, answer);
+            }
+            None => i += 1,
+        }
     }
 }
 
