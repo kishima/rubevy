@@ -3,7 +3,7 @@
 Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 [SabiRuby](https://crates.io/crates/sabiruby) VM.
 
-## What works (2026-09-13, v1: tasks)
+## What works (2026-09-15, v1: tasks)
 
 * `.mrb` files (compiled with mruby 4.1's `mrbc`) load as `MrbAsset` through Bevy's asset server.
 * **One VM for the app, one task per script.** A `Script` component becomes a task of
@@ -27,6 +27,15 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 * **A question written as a call**: `require "proxy"` gives a script `Rubevy::Proxy`, whose
   `robot.move_to(1, 2)` is `Rubevy.ask("robot.move_to", 1, 2).pop`. Registering a real method
   is the plain way; a proxy is for objects the game did not register (`docs/host-api.md`).
+* **Components by name**: `e.get(:Transform)` answers a Hash of the component's fields,
+  `e[:Transform] = tf` writes back the fields the Hash names, and `e.has?`, `e.components`
+  and `Rubevy.find(:Npc)` say what is where. It goes through Bevy's reflection, so no type
+  is named in rubevy: a game's own component joins in with `#[derive(Reflect)]`,
+  `#[reflect(Component)]` and `register_type` (`docs/host-api.md`).
+* **Events**: `Rubevy.subscribe(:hit)` answers a queue the game pushes onto
+  (`ScriptWorld::publish`), so a script waits for something to happen exactly as it waits
+  for an answer — in its own task, or in one it made with `Task.new`, which is what a reflex
+  wants. A game joins one of Bevy's events with one observer.
 * The script reads `$rubevy` (`:frame`, `:delta`, `:time`); `puts`/`p` go to Bevy's log;
   a `ScriptEnded` message carries what the task answered, or the exception it did not
   handle (mruby-task makes that the task's result, so one broken script does not stop
@@ -38,8 +47,9 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 Scripts share the VM, so they share globals and constants. That is the design; a use
 that needs isolation wants a second VM, which this plugin does not build yet.
 
-Not yet: reading components other than the ones above, events, hot reload, the
-reflection bridge (`docs/outlook.md`).
+Not yet: building a component from Ruby to spawn with, queries as blocks
+(`each(:Enemy, :Transform) { }`), hot reload that keeps a script's state, a heap
+cap (`docs/outlook.md`).
 
 How a script and the game actually meet — `Rubevy.ask`, answering from a system, the clock, reading
 where a script stands, stopping it — and what that gains over embedding the C mruby, is written up
@@ -58,11 +68,13 @@ sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```
 
 ```
-tools/compile_scripts.sh          # assets/scripts/*.rb -> .mrb (Docker, reference mrbc)
+tools/compile_scripts.sh          # the .rb that ships here -> .mrb (Docker, reference mrbc)
 cargo run --example headless      # MinimalPlugins + AssetPlugin + RubevyPlugin, no window
 cargo run --example sensor        # Rubevy.ask, answered by a system two frames later
 cargo run --example async         # Rubevy.ask, answered from a future on the task pool,
                                   # then the same question written as a call on a proxy
+cargo run --example components    # a script reads its own Transform, moves it, writes it back
+cargo run --example events        # an observer publishes to a queue; a reflex task waits on it
 ```
 
 ```rust

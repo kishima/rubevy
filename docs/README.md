@@ -6,7 +6,7 @@ This repository is small, so its documents sit flat here; the worklog has its ow
 
 | file | language | what it is |
 |---|---|---|
-| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, answers, entities, `Rubevy::Proxy`, time limits, replacing a script |
+| [host-api.md](host-api.md) | English | what a script can say to the game and the game to a script: `Rubevy.ask`, answers, entities, components by name, events, `Rubevy::Proxy`, time limits, replacing a script |
 | [rust-bridge.ja.md](rust-bridge.ja.md) | Japanese | how a robot's question travels through rubevy and the game and back, point by point against embedding the C mruby |
 | [outlook.md](outlook.md) | English | what rubevy builds on SabiRuby, in order, with the status of each item; the honest comparison with Lua; the possibilities |
 | [outlook.ja.md](outlook.ja.md) | Japanese | the possibilities and the status, in plain Japanese |
@@ -21,3 +21,5 @@ The worklog, newest last:
 | [worklog/2026-09-15-stage3b-no-internal-access.md](worklog/2026-09-15-stage3b-no-internal-access.md) | the four places that reached into `Vm`'s fields, moved to the VM's own entry points |
 | [worklog/2026-09-15-stage6bc-futures-proxy.md](worklog/2026-09-15-stage6bc-futures-proxy.md) | `answer_with` (a request answered from a future), and why the dynamic proxy of stage 6c stopped at the VM's C-function boundary |
 | [worklog/2026-09-15-stage6c-proxy.md](worklog/2026-09-15-stage6c-proxy.md) | the dynamic proxy finished once the VM stopped putting a boundary around `method_missing`: what `proxy.rb` is, and what it does not say about itself |
+| [worklog/2026-09-15-ecs-bridge.md](worklog/2026-09-15-ecs-bridge.md) | components by name through Bevy's reflection: what the plan assumed about `Vec3` and `TransformPlugin`, and why the read is `get` and not `[]` |
+| [worklog/2026-09-15-events.md](worklog/2026-09-15-events.md) | events as queues: where a subscription is let go of, the 64-message limit, and the two tests that were racing the schedule |
