@@ -17,6 +17,13 @@
 //!   `Rubevy.move_to` — these do not touch the Bevy world from inside the VM
 //!   (a native cannot); they put a command on a queue that a system drains
 //!   after the frame's scripts have run.
+//! * **Components by name**: `entity.get(:Transform)` answers a Hash of its
+//!   fields, `entity[:Transform] = hash` writes back the fields the Hash names,
+//!   and `entity.has?`, `entity.components` and `Rubevy.find(:Npc)` say what is
+//!   where. It goes through Bevy's reflection, so no type is named in rubevy —
+//!   a game's own component joins in by being
+//!   `#[derive(Reflect)] #[reflect(Component)]` and registered. A read waits
+//!   for the host, which is one frame.
 //! * `puts`/`p` output is forwarded to Bevy's log.
 //!
 //! A script may `require` another, which reads from the asset directory
@@ -28,8 +35,11 @@
 //! design, not an oversight: a game's scripts are written together. A use that
 //! needs isolation wants a second VM, which this plugin does not build yet.
 
+mod reflect;
+
 use bevy::asset::{io::Reader, Asset, AssetApp, AssetLoader, LoadContext};
 use bevy::diagnostic::FrameCount;
+use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
@@ -37,6 +47,8 @@ use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use sabiruby::convert::{DataRef, This};
 use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
+
+use crate::reflect::RubyData;
 
 /// The bytes of a RITE binary (`.mrb`).
 #[derive(Asset, TypePath, Debug, Clone)]
@@ -175,6 +187,19 @@ enum HostCommand {
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
     /// `Rubevy.ask`: the script is parked on a queue until the game answers it.
     Ask { entity: u64, kind: String, args: Vec<Arg>, queue: ObjId },
+    /// `entity[:Transform] = hash`, through `Rubevy.set_component`: the value was read out of
+    /// the VM by the native (a `&mut World` is a system away), and [`apply_component_writes`]
+    /// writes it over the component through `ReflectComponent`.
+    SetComponent { entity: u64, name: String, value: RubyData },
+}
+
+/// A component write waiting for the exclusive system that can make it
+/// ([`apply_component_writes`]).
+#[derive(Debug, Clone)]
+struct ComponentWrite {
+    entity: Entity,
+    name: String,
+    value: RubyData,
 }
 
 /// An argument of `Rubevy.ask`, after the name of what is being asked for.
@@ -286,6 +311,14 @@ pub struct ScriptWorld {
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
     requests: Vec<Request>,
+    /// The questions rubevy answers itself ([`RESERVED_KINDS`]) rather than handing to the
+    /// game: a component by name, and the entities that have one. They are kept apart from
+    /// [`ScriptWorld::requests`] at the moment they are made, so a game's own answering system
+    /// never sees a kind it does not know — and cannot answer one of these by mistake.
+    reflect_requests: Vec<Request>,
+    /// Component writes waiting for [`apply_component_writes`], which is the system that has a
+    /// `&mut World` to make them with.
+    component_writes: Vec<ComponentWrite>,
     /// Answers still being worked out on Bevy's task pool ([`ScriptWorld::answer_with`]), each
     /// with the request it belongs to. [`deliver_answers`] takes them off as they finish.
     answering: Vec<(Request, Task<Answer>)>,
@@ -311,6 +344,12 @@ impl ScriptWorld {
         // one process each have their own (`Vm::set_host_state`)
         vm.set_host_state(HostState::default());
         let entity_class = install_host_api(&mut vm);
+        // the Ruby half of the host API (`src/prelude.rb`), which is Ruby because each method
+        // in it waits for an answer and a native cannot be parked
+        if let Err(e) = vm.load_and_run(PRELUDE) {
+            let message = vm.describe_error(&e);
+            return Err(format!("prelude: {message}"));
+        }
         // An entity object owns nothing on the host's side — its handle *is* `Entity::to_bits`,
         // and the ECS is what says whether that entity still exists — so there is nothing to
         // release here. The hook is registered all the same: it is the place a kind of Data that
@@ -334,6 +373,8 @@ impl ScriptWorld {
             overrun: Some(std::time::Duration::from_millis(50)),
             tick_remainder: 0.0,
             requests: Vec::new(),
+            reflect_requests: Vec::new(),
+            component_writes: Vec::new(),
             answering: Vec::new(),
             entity_class,
             freed_entities,
@@ -403,6 +444,40 @@ impl ScriptWorld {
                 self.vm.ary_new(items)
             }
         };
+        self.push_answer(request, value);
+    }
+
+    /// Answers a request with a value built inside the VM.
+    ///
+    /// [`Answer`] is flat — numbers, a string, a list of numbers, a table of them — because
+    /// that is what a game asking about the world usually has. A component read by name is not
+    /// flat (`{translation: [x, y, z], rotation: [x, y, z, w]}`), and nesting [`Answer`] to
+    /// carry it would be a second, poorer copy of what the VM can already build. So the host is
+    /// handed the `Vm` and builds the value with `hash_new` / `hash_set` / `ary_new` /
+    /// `str_new`, or with sabiruby's `IntoRuby`:
+    ///
+    /// ```no_run
+    /// # use rubevy::{Request, ScriptWorld};
+    /// # use sabiruby::Value;
+    /// fn answer_inventory(world: &mut ScriptWorld, request: &Request) {
+    ///     world.answer_value(request, |vm| {
+    ///         let h = vm.hash_new();
+    ///         let k = Value::Sym(vm.intern("gold"));
+    ///         let _ = vm.hash_set(h, k, Value::Int(12));
+    ///         h
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// The closure runs at once, inside this call, and the same rule holds as for
+    /// [`ScriptWorld::answer`]: answer each request once. Nothing in the closure may park a
+    /// task — it is host code, not a script.
+    pub fn answer_value(&mut self, request: &Request, build: impl FnOnce(&mut Vm) -> Value) {
+        let value = build(&mut self.vm);
+        self.push_answer(request, value);
+    }
+
+    fn push_answer(&mut self, request: &Request, value: Value) {
         if let Err(e) = self.vm.task_queue_push(request.queue, value) {
             let message = self.vm.describe_error(&e);
             error!("rubevy: could not answer {}: {message}", request.kind);
@@ -556,7 +631,18 @@ impl Plugin for RubevyPlugin {
             .init_asset_loader::<MrbLoader>()
             .add_message::<ScriptEnded>()
             .insert_resource(world)
-            .add_systems(Update, (start_scripts, deliver_answers, tick_scripts, drain_commands).chain());
+            .add_systems(
+                Update,
+                (
+                    start_scripts,
+                    deliver_answers,
+                    answer_components,
+                    tick_scripts,
+                    drain_commands,
+                    apply_component_writes,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -709,8 +795,20 @@ fn drain_commands(
         match c {
             HostCommand::Ask { entity, kind, args, queue } => {
                 // parked scripts wait here until a system of the game answers
-                // (`ScriptWorld::take_requests` / `answer`)
-                world.requests.push(Request { entity: entity_from_bits(entity), kind, args, queue });
+                // (`ScriptWorld::take_requests` / `answer`) — except the handful of kinds
+                // rubevy answers itself, which are sorted out here rather than left for a
+                // game's system to skip over
+                let request = Request { entity: entity_from_bits(entity), kind, args, queue };
+                if RESERVED_KINDS.contains(&request.kind.as_str()) {
+                    world.reflect_requests.push(request);
+                } else {
+                    world.requests.push(request);
+                }
+            }
+            HostCommand::SetComponent { entity, name, value } => {
+                if let Some(entity) = entity_from_bits(entity) {
+                    world.component_writes.push(ComponentWrite { entity, name, value });
+                }
             }
             HostCommand::Log(text) => info!("[script] {text}"),
             HostCommand::Spawn { name, x, y, z } => {
@@ -736,7 +834,171 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
     Entity::try_from_bits(bits)
 }
 
+// ------------------------------------------------------------------ components by name
+
+/// The `Rubevy.ask` kinds rubevy answers itself, in [`answer_components`]. A game never sees
+/// them in [`ScriptWorld::take_requests`], and a game that wants these names for itself has to
+/// pick others.
+///
+/// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`, and
+/// `Rubevy.find`.
+const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components", "entities.with"];
+
+/// Answers the questions about components, at the head of the frame and before the scripts
+/// run.
+///
+/// A question asked on one frame is answered at the head of the next: the `Rubevy.ask` leaves
+/// a command behind, [`drain_commands`] turns it into a request at the end of that frame, and
+/// this system answers it before [`tick_scripts`] resumes the script. So a read costs one
+/// frame of waiting, which is the shape to write scripts in — touch components when something
+/// happens (at the start, on an event, after a `sleep`), not a dozen times a frame. The task is
+/// parked meanwhile and costs nothing; the other scripts keep running.
+///
+/// What is reachable here is what is registered: a type with `#[derive(Reflect)]`,
+/// `#[reflect(Component)]` and `app.register_type::<T>()`. Bevy registers its own
+/// (`Transform`, `Visibility`, `Name`, …) in the plugins that own them — `TransformPlugin` for
+/// `Transform`, which `MinimalPlugins` does not add. An unregistered type is not an error: the
+/// component reads as `nil`, `has?` as `false`, and it is not in `components`.
+fn answer_components(world: &mut World) {
+    if world.resource::<ScriptWorld>().reflect_requests.is_empty() {
+        return;
+    }
+    let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else {
+        warn!("rubevy: no AppTypeRegistry, so no component is reachable by name");
+        let mut scripts = world.resource_mut::<ScriptWorld>();
+        for request in std::mem::take(&mut scripts.reflect_requests) {
+            scripts.answer(&request, Answer::Nil);
+        }
+        return;
+    };
+    let registry = registry.read();
+    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld>| {
+        let world = &*world;
+        let entity_class = scripts.entity_class;
+        for request in std::mem::take(&mut scripts.reflect_requests) {
+            // the component's short name (`"Transform"`), or its whole path where two types
+            // share the short one (`"my_game::Hp"`)
+            let named = |i: usize| -> Option<&bevy::reflect::TypeRegistration> {
+                let name = request.text(i)?;
+                registry
+                    .get_with_short_type_path(name)
+                    .or_else(|| registry.get_with_type_path(name))
+            };
+            match request.kind.as_str() {
+                "component.get" => {
+                    let value = named(1)
+                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                        .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
+                        .and_then(|(rc, entity)| rc.reflect(entity));
+                    match value {
+                        Some(value) => scripts.answer_value(&request, |vm| {
+                            reflect::reflect_to_ruby(
+                                vm,
+                                value.as_partial_reflect(),
+                                entity_class,
+                                ENTITY_TAG,
+                            )
+                        }),
+                        None => scripts.answer(&request, Answer::Nil),
+                    }
+                }
+                "component.has" => {
+                    let has = named(1)
+                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                        .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
+                        .is_some_and(|(rc, entity)| rc.contains(entity));
+                    scripts.answer(&request, Answer::Bool(has));
+                }
+                "components" => {
+                    let mut names: Vec<String> = Vec::new();
+                    if let Some(entity) = request.entity_arg(0).and_then(|e| world.get_entity(e).ok())
+                    {
+                        for registration in registry.iter() {
+                            let Some(rc) =
+                                registration.data::<bevy::ecs::reflect::ReflectComponent>()
+                            else {
+                                continue;
+                            };
+                            if rc.contains(entity) {
+                                names.push(
+                                    registration.type_info().type_path_table().short_path().to_string(),
+                                );
+                            }
+                        }
+                    }
+                    // the registry is a map, so its order is not the same twice; a script that
+                    // prints this wants it to read the same every run
+                    names.sort();
+                    scripts.answer_value(&request, |vm| {
+                        let items: Vec<Value> =
+                            names.iter().map(|n| vm.str_new(n.as_bytes())).collect();
+                        vm.ary_new(items)
+                    });
+                }
+                "entities.with" => {
+                    let mut found: Vec<Entity> = Vec::new();
+                    if let Some(rc) =
+                        named(0).and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                    {
+                        // every entity in the world: this is the lookup the rustdoc of
+                        // `Rubevy.find` warns is not for every frame
+                        for entity in world.iter_entities() {
+                            if rc.contains(entity) {
+                                found.push(entity.id());
+                            }
+                        }
+                    }
+                    scripts.answer_value(&request, |vm| {
+                        let items: Vec<Value> = found
+                            .iter()
+                            .map(|e| vm.data_new(entity_class, ENTITY_TAG, e.to_bits()))
+                            .collect();
+                        vm.ary_new(items)
+                    });
+                }
+                _ => scripts.answer(&request, Answer::Nil),
+            }
+        }
+    });
+}
+
+/// Writes what the scripts put on components this frame (`entity[:Transform] = hash`).
+///
+/// It runs after [`drain_commands`], at the end of the frame, which is the promise `Commands`
+/// makes and the one `Rubevy.spawn` already made: a script's write is seen by the next frame,
+/// not in the middle of this one.
+fn apply_component_writes(world: &mut World) {
+    if world.resource::<ScriptWorld>().component_writes.is_empty() {
+        return;
+    }
+    let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld>().component_writes);
+    let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
+    let registry = registry.read();
+    for write in writes {
+        let Some(rc) = registry
+            .get_with_short_type_path(&write.name)
+            .or_else(|| registry.get_with_type_path(&write.name))
+            .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+        else {
+            warn!("rubevy: no registered component named {}", write.name);
+            continue;
+        };
+        let Ok(mut entity) = world.get_entity_mut(write.entity) else { continue };
+        let Some(mut value) = rc.reflect_mut(&mut entity) else {
+            warn!("rubevy: {} has no {}", write.entity, write.name);
+            continue;
+        };
+        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
+            warn!("rubevy: {} was not written whole: {e}", write.name);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ the Ruby side
+
+/// The Ruby half of the host API, run when the VM starts: `Rubevy::Entity#[]` and the rest
+/// (`src/prelude.rb`, compiled by `tools/compile_scripts.sh`).
+const PRELUDE: &[u8] = include_bytes!("prelude.mrb");
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
 /// scripts Data objects of its own picks other numbers.
@@ -870,6 +1132,20 @@ fn install_host_api(vm: &mut Vm) -> ObjId {
         let entity = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
         push_command(vm, HostCommand::Ask { entity, kind, args, queue });
         Ok(Value::Obj(queue))
+    });
+    // `entity[:Transform] = hash` goes through here (`src/prelude.rb`). It is a command rather
+    // than a question: the script does not wait for it, and the write lands with the frame's
+    // other commands. The Hash is read out of the VM now, while there is a `&mut Vm`;
+    // `apply_component_writes` has the world but no VM.
+    vm.define_closure(sc, "set_component", |vm, _s, a, _b| {
+        let bits = entity_arg(vm, a.first())?;
+        let name = match a.get(1) {
+            Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
+            None => return Err(vm.raise_arg("set_component needs the name of a component")),
+        };
+        let value = reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
+        push_command(vm, HostCommand::SetComponent { entity: bits, name, value });
+        Ok(Value::Nil)
     });
     vm.define_closure(sc, "set_position", |vm, _s, a, _b| {
         let bits = entity_arg(vm, a.first())?;
