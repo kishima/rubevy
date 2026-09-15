@@ -135,7 +135,7 @@ registry holds, through `ReflectComponent`, so a game's own component works the 
 
 ```ruby
 e  = Rubevy.entity
-tf = e.get(:Transform)          # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
+tf = e[:Transform]              # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
 tf[:translation][0] += 1.0
 e[:Transform] = tf              # applied after this frame's scripts have run
 
@@ -176,7 +176,7 @@ only have its fields written while it is already the current one. A field that c
 it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
 the write still happens.
 
-**A read costs a frame.** `e.get(:Transform)` is `Rubevy.ask` under a nicer name: the question
+**A read costs a frame.** `e[:Transform]` is `Rubevy.ask` under a nicer name: the question
 goes out with the frame's commands and rubevy answers it at the head of the next frame, before
 the scripts run. The task is parked meanwhile, so it costs nothing and the other scripts keep
 running, but this is a boundary for declaration time and for events — not for a dozen reads a
@@ -187,12 +187,16 @@ The four kinds rubevy answers itself — `component.get`, `component.has`, `comp
 request is made, so a game's answering system sees only its own. A game that wants those names
 picks others.
 
-**Why `get` and not `[]`.** mrbc folds a one-argument `[]` into `OP_GETIDX`, which the VM
-dispatches with `funcall` — a nested run loop, which is a native boundary, and a task cannot be
-parked across one (`blocking pop cannot be called from within a C function boundary`). A plain
-call is dispatched in the caller's frame and may wait. `[]=` has no such trouble, because
-writing waits for nothing. The Ruby side of all this is `src/prelude.rb`, compiled to `.mrb` and
-run when the VM starts, so a script has these without requiring anything.
+**Why a read can wait inside `[]`.** mrbc folds a one-argument `[]` into `OP_GETIDX`, which the
+VM used to dispatch with `funcall` — a nested run loop, which is a native boundary, and a task
+cannot be parked across one (`blocking pop cannot be called from within a C function boundary`).
+For a while the read was `e.get(:Transform)` for that reason. SabiRuby now does what the
+reference does: the opcode answers an Array, Hash or String itself and *sends* everything else
+in the frame the call was made in, so a `[]` written in Ruby is an ordinary frame that a task
+can be parked in. `e[:Transform]` is the spelling; `e.get(:Transform)` is the same call, kept
+because spelling the round trip out reads better where it matters. The Ruby side of all this is
+`src/prelude.rb`, compiled to `.mrb` and run when the VM starts, so a script has these without
+requiring anything.
 
 ## Events
 

@@ -1,4 +1,4 @@
-//! Components by name: `entity.get(:Transform)` reads one through Bevy's reflection, `entity[:X] =`
+//! Components by name: `entity[:Transform]` reads one through Bevy's reflection, `entity[:X] =`
 //! writes it back with the frame's other commands, `has?` and `components` say what is there,
 //! and `Rubevy.find` looks for everything that has a component. No type in rubevy knows what a
 //! `Transform` or an `Hp` is; the registry does.
@@ -85,7 +85,7 @@ fn a_script_reads_a_transform_as_a_hash() {
         &mut app,
         entity,
         r#"
-          tf = Rubevy.entity.get(:Transform)
+          tf = Rubevy.entity[:Transform]
           Rubevy.ask("read",
                      tf.class.to_s,
                      tf[:translation].length,
@@ -115,7 +115,7 @@ fn a_script_writes_one_field_and_leaves_the_others() {
         entity,
         r#"
           e = Rubevy.entity
-          tf = e.get(:Transform)
+          tf = e[:Transform]
           tf[:translation][0] += 5.0
           e[:Transform] = tf
           e[:Hp] = { current: 4.0 }        # `max` is not named, so it stays
@@ -139,7 +139,7 @@ fn a_symbol_switches_an_enum_component() {
         &mut app,
         entity,
         r#"
-          was = Rubevy.entity.get(:Mode)
+          was = Rubevy.entity.get(:Mode)   # `get` is still there, and is the same round trip
           Rubevy.entity[:Mode] = :Hunting
           Rubevy.ask("mode", was.to_s, was.class.to_s).pop
         "#,
@@ -167,7 +167,7 @@ fn has_and_components_and_the_unregistered() {
                      e.has?(:Npc).to_s,
                      e.has?(:Secret).to_s,
                      e.components.join(","),
-                     e.get(:Secret).inspect).pop
+                     e[:Secret].inspect).pop
         "#,
     );
     frames(&mut app, 10);
@@ -221,7 +221,7 @@ fn rubevys_own_questions_never_reach_the_game() {
         entity,
         r#"
           e = Rubevy.entity
-          e.get(:Transform)
+          e[:Transform]
           e.has?(:Transform)
           e.components
           Rubevy.find(:Npc)

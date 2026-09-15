@@ -27,7 +27,7 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
 * **A question written as a call**: `require "proxy"` gives a script `Rubevy::Proxy`, whose
   `robot.move_to(1, 2)` is `Rubevy.ask("robot.move_to", 1, 2).pop`. Registering a real method
   is the plain way; a proxy is for objects the game did not register (`docs/host-api.md`).
-* **Components by name**: `e.get(:Transform)` answers a Hash of the component's fields,
+* **Components by name**: `e[:Transform]` answers a Hash of the component's fields,
   `e[:Transform] = tf` writes back the fields the Hash names, and `e.has?`, `e.components`
   and `Rubevy.find(:Npc)` say what is where. It goes through Bevy's reflection, so no type
   is named in rubevy: a game's own component joins in with `#[derive(Reflect)]`,

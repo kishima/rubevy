@@ -23,3 +23,4 @@ The worklog, newest last:
 | [worklog/2026-09-15-stage6c-proxy.md](worklog/2026-09-15-stage6c-proxy.md) | the dynamic proxy finished once the VM stopped putting a boundary around `method_missing`: what `proxy.rb` is, and what it does not say about itself |
 | [worklog/2026-09-15-ecs-bridge.md](worklog/2026-09-15-ecs-bridge.md) | components by name through Bevy's reflection: what the plan assumed about `Vec3` and `TransformPlugin`, and why the read is `get` and not `[]` |
 | [worklog/2026-09-15-events.md](worklog/2026-09-15-events.md) | events as queues: where a subscription is let go of, the 64-message limit, and the two tests that were racing the schedule |
+| [worklog/2026-09-15-entity-index.md](worklog/2026-09-15-entity-index.md) | `e[:Transform]` once the VM stopped putting a boundary around `OP_GETIDX`: what changed in sabiruby, and why `get` stayed |

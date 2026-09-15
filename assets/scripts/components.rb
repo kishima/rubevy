@@ -9,7 +9,7 @@ Rubevy.log "components: a Waypoint? #{Rubevy.entity.has?(:Waypoint)}"
 
 4.times do |i|
   e = Rubevy.entity
-  tf = e.get(:Transform)                    # parked here until the host answers, next frame
+  tf = e[:Transform]                        # parked here until the host answers, next frame
   x = tf[:translation][0]
   Rubevy.log "components: step #{i}, x = #{x.round(2)}"
   tf[:translation][0] = x + 1.0             # a Vec3 is three numbers
@@ -22,7 +22,7 @@ end
 waypoints = Rubevy.find(:Waypoint)
 Rubevy.log "components: #{waypoints.length} waypoints"
 waypoints.each do |w|
-  at = w.get(:Transform)[:translation]
+  at = w[:Transform][:translation]
   Rubevy.log "components:   #{w.inspect} at #{at[0].round(1)}, #{at[1].round(1)}"
 end
 

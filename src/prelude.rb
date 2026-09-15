@@ -6,7 +6,7 @@
 # is the one thing a native cannot do: `Rubevy.ask` parks the task on a queue, and the VM
 # refuses a blocking `pop` inside a native ("blocking pop cannot be called from within a C
 # function boundary", sabiruby src/builtins/ext_task.rs). A native would have to hand the queue
-# back and let the script `pop` it, which is not what `e.get(:Transform)` should be. So the work
+# back and let the script `pop` it, which is not what `e[:Transform]` should be. So the work
 # stays on the Rust side (`answer_components` in src/lib.rs) and the waiting is here — the same
 # reason `Rubevy::Proxy` is Ruby.
 module Rubevy
@@ -15,14 +15,18 @@ module Rubevy
     # type — or the type is not registered (`app.register_type::<T>()`; nothing unregistered is
     # visible from Ruby). The answer comes from the host on the next frame, and the task is
     # parked until it does.
-    #
-    # It is `get` and not `[]` because of how `e[:Transform]` is compiled: mrbc turns a one-
-    # argument `[]` into OP_GETIDX, which sabiruby dispatches with `funcall` — a nested run
-    # loop, which is a native boundary, and a task cannot be parked across one. A plain call
-    # (OP_SEND) is dispatched in the caller's frame and may wait. `[]=` has no such trouble:
-    # writing does not wait for anything, so it is spelled the way it reads.
     def get(name)
       Rubevy.ask("component.get", self, name.to_s).pop
+    end
+
+    # `e[:Transform]`, which is what a script writes. mrbc folds a one-argument `[]` into
+    # OP_GETIDX; the VM answers an Array, Hash or String itself and *sends* everything else in
+    # the frame the call was made in, so this body is an ordinary frame and the task can be
+    # parked in it until the host answers. It was `get` only (sabiruby ran OP_GETIDX through a
+    # nested run loop, which is a native boundary a task cannot be parked across); `get` stays
+    # because a script that spells the round trip out is easier to read than one that does not.
+    def [](name)
+      get(name)
     end
 
     # Writes are deferred, as `Rubevy.spawn` and `Rubevy.move_to` are: the value is applied
