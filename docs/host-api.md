@@ -126,6 +126,36 @@ thread puts `multi_threaded` in the features of its own `bevy` dependency; this 
 `TaskPoolPlugin`, which `MinimalPlugins` and `DefaultPlugins` both add — `answer_with` panics
 without it, because the pool it spawns on does not exist.
 
+## A dynamic proxy (`Rubevy::Proxy`)
+
+`assets/scripts/proxy.rb` is a small Ruby library that turns a call into a question:
+
+```ruby
+require "proxy"
+
+robot = Rubevy::Proxy.new("robot")
+robot.move_to(1, 2)          # => Rubevy.ask("robot.move_to", 1, 2).pop
+robot.hp                     # => Rubevy.ask("robot.hp").pop
+```
+
+The game answers `"robot.move_to"` as it answers any other kind, and the task is parked on the
+answer in the usual way — the call takes as many frames as the answer does. The proxy has a
+`kind`, an `inspect` and a `respond_to_missing?` that says yes to everything, so `respond_to?`
+agrees with what a call actually does.
+
+**Registration is the plain way; a proxy is for objects the game did not register.** A real
+method — `Rubevy.spawn`, `Rubevy.move_to`, or one the host adds with `Vm::define_fn` — says what
+it takes, fails at the call when the name is wrong, and costs nothing to look up. A proxy says
+nothing about itself: every name is accepted, every mistake becomes a question the game has to
+recognise or ignore, and the script finds out at run time. Use it where the thing on the other
+side is not rubevy's to register — another robot, an entity of a game that decides its own verbs,
+a service reached over the `ask` channel — and register everything else.
+
+It rests on one property of the VM: a `method_missing` written in Ruby is dispatched in the frame
+the call was made in, not in a nested run loop, so the body may park the task on `pop` (SabiRuby
+`docs/design/fibers.md`, "Native boundaries"). Before that the same file raised
+`blocking pop cannot be called from within a C function boundary`.
+
 ## What the script sees of the frame
 
 `$rubevy` is refreshed at the head of every frame: `:frame` (the count), `:delta` (seconds since

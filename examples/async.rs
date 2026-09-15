@@ -2,6 +2,9 @@
 //! on Bevy's task pool. The "path search" takes longer than a frame, so the script is parked
 //! for several of them while the ticker beside it keeps running — which is the point.
 //!
+//! The script then asks the same kind of question as a method call, through
+//! `Rubevy::Proxy` (`assets/scripts/proxy.rb`), which arrives here as `robot.move_to`.
+//!
 //!     cargo run --example async
 
 use std::time::Duration;
@@ -48,6 +51,14 @@ fn answer_requests(mut world: ResMut<ScriptWorld>, frame: Res<FrameCount>) {
                 let (x, y) = (request.num_or(0, 0.0), request.num_or(1, 0.0));
                 info!("host: frame {now}: a path to ({x}, {y}) — handing it to the task pool");
                 world.answer_with(request, walk(x, y));
+            }
+            // `Rubevy::Proxy.new("robot").move_to(1, 2)` in the script arrives here: the
+            // proxy makes the question out of the object's kind and the method's name, so a
+            // game answers it the same way it answers any other (`assets/scripts/proxy.rb`).
+            "robot.move_to" => {
+                let (x, y) = (request.num_or(0, 0.0), request.num_or(1, 0.0));
+                info!("host: frame {now}: the robot is moving to ({x}, {y})");
+                world.answer(&request, Answer::List(vec![x, y]));
             }
             other => {
                 info!("host: frame {now}: nothing to say about {other}");

@@ -24,6 +24,9 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
   a `Future` instead: it goes to Bevy's task pool and the plugin answers the script on the
   frame it finishes. Bevy's pools are threads only with bevy's own `multi_threaded` feature —
   this crate does not ask for it, the app does (`docs/host-api.md`).
+* **A question written as a call**: `require "proxy"` gives a script `Rubevy::Proxy`, whose
+  `robot.move_to(1, 2)` is `Rubevy.ask("robot.move_to", 1, 2).pop`. Registering a real method
+  is the plain way; a proxy is for objects the game did not register (`docs/host-api.md`).
 * The script reads `$rubevy` (`:frame`, `:delta`, `:time`); `puts`/`p` go to Bevy's log;
   a `ScriptEnded` message carries what the task answered, or the exception it did not
   handle (mruby-task makes that the task's result, so one broken script does not stop
@@ -58,7 +61,8 @@ sabiruby-compiler = { path = "../sabiruby/compiler" }
 tools/compile_scripts.sh          # assets/scripts/*.rb -> .mrb (Docker, reference mrbc)
 cargo run --example headless      # MinimalPlugins + AssetPlugin + RubevyPlugin, no window
 cargo run --example sensor        # Rubevy.ask, answered by a system two frames later
-cargo run --example async         # Rubevy.ask, answered from a future on the task pool
+cargo run --example async         # Rubevy.ask, answered from a future on the task pool,
+                                  # then the same question written as a call on a proxy
 ```
 
 ```rust
