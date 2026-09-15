@@ -59,3 +59,30 @@ module Rubevy
     ask("entities.with", name.to_s).pop
   end
 end
+
+# A task a script makes with `Task.new` carries the entity of the task that made it.
+#
+# `Rubevy.entity`, `Rubevy.ask` and `Rubevy.subscribe` all read the entity off the task the
+# scheduler is running — the plugin hangs it on the script's own task as `@rubevy_entity`
+# (`ENTITY_IVAR` in src/lib.rs) — and a task made out of a block has none, so without this a
+# script's second task could not ask the game anything or subscribe to anything. SabiRuby's
+# `Task` does not record which task made it (`TaskData` in src/builtins/ext_task.rs has no
+# parent), and the one place that still knows is the call itself: inside `Task.new`,
+# `Task.current` is the task doing the making. So the entity is copied here rather than looked
+# up through a parent later; a task made by a task that inherited one inherits it in turn.
+#
+# A script may still set `@rubevy_entity` on a task itself — it is an ordinary instance
+# variable — which is what a task that should act for another entity does.
+class Task
+  class << self
+    alias __rubevy_plain_new new
+
+    def new(*args, **kw, &block)
+      task = __rubevy_plain_new(*args, **kw, &block)
+      parent = Task.current
+      entity = parent && parent.instance_variable_get(:@rubevy_entity)
+      task.instance_variable_set(:@rubevy_entity, entity) unless entity.nil?
+      task
+    end
+  end
+end
