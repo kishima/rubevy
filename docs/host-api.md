@@ -91,6 +91,8 @@ actually run.
 `$rubevy` is refreshed at the head of every frame: `:frame` (the count), `:delta` (seconds since
 the last frame) and `:time` (seconds since the start). Reading it is how a script knows where it
 is in the run without asking.
+The plugin puts it there with `Vm::global_set`, so it is an ordinary global: a script may write
+to it, and what it writes stands until the next frame replaces it.
 
 ## Time
 
@@ -121,8 +123,10 @@ frame (without `overrun`, that test never finishes). The VM side is written up i
 
 `Cargo.toml` names the VM from git while the entry points this plugin needs are still being added
 (`Vm::task_instructions` and `task_location`, and since 2026-09-15 `define_closure`,
-`set_host_state`, `define_fn` and `data_new`, are newer than the published 0.4.0). A clone still
-builds on its own — cargo fetches it — and it goes back to a crates.io version once the API
+`set_host_state`, `define_fn`, `data_new`, and `task_running` / `ivar_get` / `ivar_set` /
+`global_get` / `global_set` / `is_exception`, are newer than the published 0.4.0). Those last six
+are what this plugin used to reach into `Vm`'s public fields for, and with them it no longer
+touches `vm.heap`, `vm.task` or `vm.globals` anywhere. A clone still builds on its own — cargo fetches it — and it goes back to a crates.io version once the API
 settles. To work against a checkout of the VM next to this one, redirect it in a git-ignored
 `.cargo/config.toml` instead of editing `Cargo.toml`:
 

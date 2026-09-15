@@ -323,10 +323,14 @@ SabiRuby で同じ種類の間違いをすると、多くはコンパイルが�
   古い実装に新しいテストを当てると「質問の数が合わない」どころか
   `access to freed object ObjId(667)` で落ちる: `Request` が持つキューの `ObjId` は VM ごとのヒープの添字で、
   VM をまたぐと別のものを指す。static を使うということは、その約束を型で守れないということでもあった。
-- **VM の内部に直接触っている。** `vm.heap.ivar_set`、`vm.task.running`、`vm.globals` は公開フィールドで、
-  rubevy はそれを使っている（タスクにエンティティ番号を持たせる、走っているタスクを知る、`$rubevy` を毎フレーム置く）。
-  Rust だから型は守られるが、VM の中身を変えると rubevy も変わる。3 つとも VM 側に相当する公開関数がまだ無く、
-  ホスト API 化は sabiruby 側の仕事として残っている（2026-09-15 の見直しで、`static` のキューだけが公開 API に移った）。
+- ~~**VM の内部に直接触っている。**~~ **直した**（2026-09-15）。`vm.heap.ivar_set` / `ivar_get`、
+  `vm.task.running`、`vm.globals.insert`、`vm.heap.get(o).kind` の 4 か所（タスクにエンティティ番号を
+  持たせる、走っているタスクを知る、`$rubevy` を毎フレーム置く、終わったタスクの結果が例外か）は、
+  VM 側に入った `Vm::ivar_set` / `ivar_get`、`task_running`、`global_set` / `global_get`、
+  `is_exception` に置き換わった。`grep -rn "vm\.heap\|vm\.task\|vm\.globals" src/` は 0 件で、
+  `sabiruby::value::Slot` と `sabiruby::object::ObjKind` の import も消えた。
+  `is_exception` は Ruby の `is_a?(Exception)` を呼ぶのではなくオブジェクトの表現を見るので、
+  判定のために VM に再入しない（再定義された `is_a?` にも影響されない）。
 - **答えの型が狭い。** `Answer` は数値・文字列・数値の配列・その表、そしてエンティティ。
   ~~エンティティ番号も `f64` で渡している~~ **エンティティは直した**（2026-09-15）。`Rubevy::Entity` という
   Data オブジェクト（`Vm::data_new`。ハンドルが `Entity::to_bits`、VM はその中身を読まない）にし、

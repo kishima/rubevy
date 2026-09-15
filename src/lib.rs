@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
 use sabiruby::convert::{DataRef, This};
-use sabiruby::value::{ObjId, Slot};
+use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
 
 /// The bytes of a RITE binary (`.mrb`).
@@ -508,6 +508,11 @@ impl Plugin for RubevyPlugin {
     }
 }
 
+/// The instance variable each task carries its entity in (`Vm::ivar_set`), read back by the
+/// natives through [`Vm::task_running`]. A script can see it — it is an ordinary `@ivar` — but
+/// the name is not one a script would write by accident.
+const ENTITY_IVAR: &str = "@rubevy_entity";
+
 /// Turns every [`Script`] whose asset has arrived into a task.
 fn start_scripts(
     mut commands: Commands,
@@ -531,8 +536,7 @@ fn start_scripts(
                 // the entity holds the task, so the collector must not take it
                 vm.gc_register(task);
                 // the task carries its entity, which is what `Rubevy.entity` answers
-                let k = vm.intern("@rubevy_entity");
-                vm.heap.ivar_set(task, k, Value::Int(entity.to_bits() as i64));
+                vm.ivar_set(task, ENTITY_IVAR, Value::Int(entity.to_bits() as i64));
                 commands.entity(entity).insert(ScriptTask { task });
             }
             Err(e) => error!("rubevy: {name} failed to start: {}", vm.describe_error(&e)),
@@ -583,16 +587,12 @@ fn tick_scripts(
             continue;
         }
         let value = world.vm.task_value(st.task);
-        let status = if is_exception(&world.vm, value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
+        let status = if world.vm.is_exception(value) { ScriptStatus::Failed } else { ScriptStatus::Finished };
         let text = world.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
         ended.write(ScriptEnded { entity, status, value: text });
         world.vm.gc_unregister(st.task);
         commands.entity(entity).insert(ScriptDone);
     }
-}
-
-fn is_exception(vm: &Vm, v: Value) -> bool {
-    v.obj().map(|o| matches!(vm.heap.get(o).kind, sabiruby::object::ObjKind::Exception)).unwrap_or(false)
 }
 
 /// `$rubevy`, refreshed at the head of every frame.
@@ -606,8 +606,7 @@ fn set_frame_state(vm: &mut Vm, frame: u32, delta: f32, elapsed: f32) {
         let k = Value::Sym(vm.intern(key));
         let _ = vm.hash_set(h, k, value);
     }
-    let n = vm.intern("$rubevy");
-    vm.globals.insert(n, Slot::from(h));
+    vm.global_set("$rubevy", h);
 }
 
 fn flush_output(vm: &mut Vm) {
@@ -802,10 +801,11 @@ fn install_host_api(vm: &mut Vm) -> ObjId {
 }
 
 /// The entity of the task the scheduler is running, as `Entity::to_bits`.
-fn current_entity(vm: &mut Vm) -> Value {
-    let Some(task) = vm.task.running else { return Value::Nil };
-    let k = vm.intern("@rubevy_entity");
-    vm.heap.ivar_get(task, k)
+fn current_entity(vm: &Vm) -> Value {
+    match vm.task_running() {
+        Some(task) => vm.ivar_get(task, ENTITY_IVAR),
+        None => Value::Nil,
+    }
 }
 
 fn num(vm: &Vm, v: Option<&Value>) -> f32 {
