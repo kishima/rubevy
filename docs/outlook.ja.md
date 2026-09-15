@@ -17,7 +17,8 @@
 | 5. 何千もの小さな心 | **できた** | 1 つの VM にスクリプトごとのタスク。SabiRuby Battle で実際に使っている |
 | 6. 機械を見ながら学ぶ | **できた（Playground）** | ブラウザで 1 命令ずつ VM の中を見られる。ゲーム側はどの行で考えているかの表示まで |
 | 7. CRuby で試作して、Bevy で出す | 変わらず | 仕組みとしては可能。道具立てはまだ |
-| ECS のエンティティを Ruby のオブジェクトに | 3 段のうち 1 段 | 書き込みをまとめて反映する段と、質問して答えを待つ形（`Rubevy.ask`）はできた。包むオブジェクトとリフレクションはまだ |
+| ECS のエンティティを Ruby のオブジェクトに | **できた**（2026-09-15） | 書き込みをまとめて反映する段、質問して答えを待つ形（`Rubevy.ask`）、`Entity` を包む `Rubevy::Entity`、そしてリフレクションでコンポーネントに名前で触る段（`e.get(:Transform)`）。残るのはクエリをブロックで書く形 |
+| Bevy のイベントを Ruby に届ける | **できた**（2026-09-15） | `Rubevy.subscribe(:hit)` がキューを返し、ゲームは observer を 1 行書く。待ち方は `ask` の答えを待つのと同じ |
 
 ## どうしてこういう夢が描けるのか
 
@@ -162,17 +163,24 @@ Playground のために作るビジュアライザ（レジスタ、フレーム
   普通のクエリで答えを作って `ScriptWorld::answer` で返します（数値、文字列、数値の配列、その表）。
   ゲームの規則は全部 Rust 側に残り、Ruby が頼めるのは「スロットルを 1.0 に」まで、という形です。SabiRuby Battle はこれだけで作っています。
 
-1 段目（`Entity` を包む Ruby オブジェクト）と 2 段目（リフレクションで名前からコンポーネントへ）はこれからで、
-見た目は次のようになる予定です。
+**2026-09-15 の現状**: 1 段目（`Entity` を包む Ruby オブジェクト）と 2 段目（リフレクションで名前から
+コンポーネントへ）も入りました。いま書けるのはこの形です。
 
 ```ruby
-e = spawn(Sprite.new("player.png"), Transform.at(0, 0))   # Entity を包んだ Ruby オブジェクト
-e[:Transform].translation.x += 1.0                          # コンポーネントに名前で触る
-e.add(Velocity.new(x: 2.0))
-e.despawn
-
-each(:Enemy, :Transform) { |enemy, tf| tf.translation.y -= 1 }   # クエリもブロックで
+e = Rubevy.entity
+tf = e.get(:Transform)          # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
+tf[:translation][0] += 1.0
+e[:Transform] = tf              # 名前の挙がったフィールドだけ、フレームの終わりに反映
+e.has?(:Velocity)               # true / false
+e.components                    # ["Transform", "Sprite", ...]
+Rubevy.find(:Npc)               # そのコンポーネントを持つエンティティの配列
 ```
+
+読みが `e[:Transform]` ではなく `e.get(:Transform)` なのは、mrbc が引数 1 個の `[]` を `OP_GETIDX` に
+畳み、VM がそれを入れ子の実行ループで回すためです。入れ子の中ではタスクを待たせられないので、
+答えを待つ読みは普通のメソッド呼び出しである必要があります（`docs/worklog/2026-09-15-ecs-bridge.md`）。
+まだ無いのは、コンポーネントを組み立てて渡す形（`spawn(Sprite.new(...))`）と、クエリをブロックで書く形
+（`each(:Enemy, :Transform) { |enemy, tf| ... }`）です。
 
 仕組みは 3 段です。
 
@@ -187,9 +195,9 @@ each(:Enemy, :Transform) { |enemy, tf| tf.translation.y -= 1 }   # クエリも�
 読み取りはその場の値が返ります。書き込みが遅れて見える点は `Commands` と同じ約束なので、Bevy を知っている人には馴染みがあります。
 
 橋を作るときは「毎フレーム大量に読み書きする」形ではなく、「宣言時に組み立てて、イベントとコルーチンで少しだけ触る」形を先に作ります。
-DSL として使う方針に合っていて、性能の弱点が効かない使い方だからです。（2026-09-15: ネイティブからホストの状態へ型付きで届く通り道はできました。
-`static` のキューは VM の `host_state` に移り、1 段目の「`Entity` を包む Ruby オブジェクト」も `Rubevy::Entity`（`Data` オブジェクト）として入りました。
-残りは 2 段目のリフレクションです。）
+DSL として使う方針に合っていて、性能の弱点が効かない使い方だからです。（2026-09-15: ネイティブからホストの状態へ型付きで届く通り道ができ、
+`static` のキューは VM の `host_state` に移り、1 段目の「`Entity` を包む Ruby オブジェクト」も `Rubevy::Entity`（`Data` オブジェクト）として入り、
+2 段目のリフレクションも入りました。読みは 1 往復 = 1 フレームなので、この「宣言時とイベント時に触る」方針はそのまま守られています。）
 
 ## 補足: Rust のメモリ安全は Ruby 側にも効く（2026-09-12、著者の指摘。2026-09-14 更新）
 
@@ -251,7 +259,8 @@ Ruby 側のミスがゲーム全体に及ばないことも、この形の利点
 例外は `ScriptEnded` メッセージになり、メモリ破壊は起きません。リリース時に Ruby を外したければ、`Script` を付けなければよいだけです。
 
 2026-09-12 の時点では「エンティティごとに VM」「イベントの受け口がない」でしたが、いまは 1 つの VM にタスクを並べる形になり、
-Ruby からの質問に system が答える通り道（`Rubevy.ask`）ができました。足りないのは ECS の橋の 1・2 段目と、Bevy のイベントを Ruby に届ける受け口です。
+Ruby からの質問に system が答える通り道（`Rubevy.ask`）ができ、2026-09-15 に ECS の橋の 1・2 段目と、
+Bevy のイベントを Ruby に届ける受け口（`Rubevy.subscribe` と `ScriptWorld::publish`）も入りました。
 
 ## 補足: Rust と Ruby の相互呼び出し（2026-09-12、著者の質問。2026-09-14 更新）
 
@@ -265,7 +274,7 @@ Ruby からの質問に system が答える通り道（`Rubevy.ask`）ができ�
 ```rust
 fn each_enemy(vm: &mut Vm, _self: Value, args: &[Value], blk: Value) -> VmResult<Value> {
     for e in enemies() {                       // Rust 側のデータ
-        let obj = wrap_entity(vm, e);          // Entity を Ruby オブジェクトに（ECS の橋の 1 段目。まだ無い）
+        let obj = entity_object(vm, class, e);  // Entity を Ruby オブジェクトに（rubevy の `entity_object`）
         vm.call_block(blk, &[obj])?;           // Ruby のブロックを呼ぶ。例外は `?` で伝わる
     }
     Ok(Value::Nil)

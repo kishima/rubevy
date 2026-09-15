@@ -14,17 +14,17 @@ the task terminated when its `ScriptTask` is removed or the entity despawned, `p
 and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
 (`sabiruby/rubevy_games`), which also runs in the browser: https://sabiruby.github.io/rubevy_games/
 
-## Status at a glance (2026-09-14)
+## Status at a glance (2026-09-15)
 
 | | item | state |
 |---|---|---|
 | bridge 1 | `Host` | **partly**: `compile` (feature `ruby-source`) and `read_file` from the asset directory; the scheduler's clock from Bevy. Randomness is the VM's own (fixed seed or `srand`), not Bevy's RNG |
 | bridge 2 | hot reload | **in the restart form**: a script is replaced by removing its `ScriptTask` and inserting a new `Script` (the old task is terminated). SabiRuby Battle reloads on file save and applies editor text in memory. Redefining methods in place is not done |
-| bridge 3 | ECS bridge | **the deferred-write half**, plus `Rubevy.ask` (request/answer, not in the original list). `Data` objects are not done |
-| bridge 4 | reflection | not started |
+| bridge 3 | ECS bridge | **done**: deferred writes, `Rubevy.ask` (request/answer, not in the original list), `Rubevy::Entity` as a `Data` object, and components by name |
+| bridge 4 | reflection | **done**: `e.get(:Transform)`, `e[:X] = hash`, `has?`, `components`, `Rubevy.find` — through `ReflectComponent`, with no glue per type |
 | bridge 5 | coroutine-style scripts | **done in task form** (`sleep`, waiting on `ask(...).pop`) |
 | bridge 6 | mruby-task | **done**, with time limits and `Task::Overrun` since 2026-09-14 |
-| bridge 7 | events | not started (`ScriptEnded` is the only message) |
+| bridge 7 | events | **done in queue form**: `Rubevy.subscribe(:hit)` answers a queue a game `publish`es onto, read in the script's own task or in one it made. No Ruby blocks as callbacks, and no `ScriptError` |
 | bridge 8 | GC in slices | **the timing half**: collections at the scheduler's idle points (`GC.scheduler_driven`). Still stop-the-world; no `gc_step` |
 | bridge 9 | in-game debugger | **the playground has the inspector**; in a game, what a script spends and the lines it keeps returning to |
 | bridge 10 | text | **done** (UTF-8 strings, feature `utf8`, default on) |
@@ -70,12 +70,22 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    (`ScriptWorld::answer`). The rules of the game stay in Rust; Ruby only asks. Wrapping
    `Entity` in a Ruby object is done since 2026-09-15 (`Rubevy::Entity`, a `Data` object that
    carries the entity's bits; `Answer::Entity`, `Arg::Entity`), and natives can be closures with
-   the command queue in the VM's typed host state, so there is no `static` any more.
+   the command queue in the VM's typed host state, so there is no `static` any more. Components
+   by name arrived the same day — see 4, which is the half of this item that was missing.
 4. **Reflect, no per-type glue.** With `Reflect`/`ReflectComponent`, field names and
    types are known at run time, so Ruby can do `entity[:Transform].translation.x = 1.0`
    without hand-written bindings. Ruby's dynamic access and Bevy's reflection are the same
    idea from two sides — the strongest fit.
-   *Now:* not started.
+   *Now:* done (2026-09-15), in the shape the VM allows. `e.get(:Transform)` answers a Hash of
+   the component's fields (`glam` vectors as Arrays, enums as the variant's Symbol),
+   `e[:Transform] = hash` writes back the fields the Hash names and leaves the rest, and
+   `e.has?`, `e.components` and `Rubevy.find(:Npc)` say what is where. Nothing per type is
+   written in rubevy: `src/reflect.rs` walks whatever `ReflectComponent` and the type registry
+   hold, so a game's own component joins in with a derive and a `register_type`. A read is one
+   question and one frame — `Rubevy.ask` under a nicer name — so it is for declaration time and
+   for events, not for a dozen reads a frame. It is `get` and not `[]` because mrbc folds a
+   one-argument `[]` into OP_GETIDX, which the VM dispatches through a nested run loop that a
+   task cannot be parked across (`docs/worklog/2026-09-15-ecs-bridge.md`).
 5. **Coroutine-style scripts.** Fibers give `sleep 0.5`, `wait_until { }`, `move_to(x, y)`
    that span frames (the feel of Unity coroutines / Godot `await`). The VM already has
    fibers and `step`; rubevy adds only "resume the yielded fiber next frame".
@@ -94,8 +104,16 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    stands in.
 7. **Events.** Bevy events/observers delivered to Ruby blocks (`on(:collision) { |a, b| }`)
    through `call_block`; Ruby exceptions become a log line and a `ScriptError` event.
-   *Now:* not started. An exception a script does not handle ends its task and becomes a
-   `ScriptEnded { status: Failed }` message; there is no `ScriptError`.
+   *Now:* done (2026-09-15) as queues rather than blocks. `Rubevy.subscribe(:hit)` answers a
+   `Task::Queue`, and a game turns one of its events into a message with one observer:
+   `scripts.publish(Some(on.entity), "hit", Answer::Num(on.damage as f64))`. A script waits on
+   the queue in its own task or in one it made with `Task.new`, which is what a reflex wants —
+   not a callback that interrupts the brain but another task that happens to be ready. Queues
+   hold 64 messages and drop the oldest, so a script that does not read is not a leak. Ruby
+   blocks as callbacks are not done and may not be wanted: a block called from the host cannot
+   wait, and waiting is the whole point of a task. An exception a script does not handle still
+   ends its task and becomes a `ScriptEnded { status: Failed }` message; there is no
+   `ScriptError`.
 8. **GC in slices.** A `gc_step(work)` entry on the VM (the book's `mrb_gc_step` shape;
    today's collector is stop-the-world) so a frame never pays a whole collection; stress
    mode in development to find missing roots early.

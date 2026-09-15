@@ -17,6 +17,17 @@
 //!   `Rubevy.move_to` — these do not touch the Bevy world from inside the VM
 //!   (a native cannot); they put a command on a queue that a system drains
 //!   after the frame's scripts have run.
+//! * **Components by name**: `entity.get(:Transform)` answers a Hash of its
+//!   fields, `entity[:Transform] = hash` writes back the fields the Hash names,
+//!   and `entity.has?`, `entity.components` and `Rubevy.find(:Npc)` say what is
+//!   where. It goes through Bevy's reflection, so no type is named in rubevy —
+//!   a game's own component joins in by being
+//!   `#[derive(Reflect)] #[reflect(Component)]` and registered. A read waits
+//!   for the host, which is one frame.
+//! * **Events**: `Rubevy.subscribe(:hit)` answers a `Task::Queue` the game
+//!   pushes onto ([`ScriptWorld::publish`]), so a script waits for something to
+//!   happen exactly as it waits for an answer — in its own task, or in one it
+//!   made with `Task.new`.
 //! * `puts`/`p` output is forwarded to Bevy's log.
 //!
 //! A script may `require` another, which reads from the asset directory
@@ -28,8 +39,11 @@
 //! design, not an oversight: a game's scripts are written together. A use that
 //! needs isolation wants a second VM, which this plugin does not build yet.
 
+mod reflect;
+
 use bevy::asset::{io::Reader, Asset, AssetApp, AssetLoader, LoadContext};
 use bevy::diagnostic::FrameCount;
+use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
@@ -37,6 +51,8 @@ use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use sabiruby::convert::{DataRef, This};
 use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
+
+use crate::reflect::RubyData;
 
 /// The bytes of a RITE binary (`.mrb`).
 #[derive(Asset, TypePath, Debug, Clone)]
@@ -125,6 +141,9 @@ fn stop_removed_task(mut world: bevy::ecs::world::DeferredWorld, context: bevy::
     let ended = world.get::<ScriptDone>(context.entity).is_some();
     let Some(mut scripts) = world.get_resource_mut::<ScriptWorld>() else { return };
     scripts.stop_task(task, !ended);
+    // and anything it was listening for: a queue nobody will read is one the game would keep
+    // filling (`Rubevy.subscribe`)
+    scripts.unsubscribe(context.entity);
 }
 
 /// What a host can show of a running script (`ScriptWorld::stats`).
@@ -175,6 +194,19 @@ enum HostCommand {
     SetPosition { entity: u64, x: f32, y: f32, z: f32 },
     /// `Rubevy.ask`: the script is parked on a queue until the game answers it.
     Ask { entity: u64, kind: String, args: Vec<Arg>, queue: ObjId },
+    /// `entity[:Transform] = hash`, through `Rubevy.set_component`: the value was read out of
+    /// the VM by the native (a `&mut World` is a system away), and [`apply_component_writes`]
+    /// writes it over the component through `ReflectComponent`.
+    SetComponent { entity: u64, name: String, value: RubyData },
+}
+
+/// A component write waiting for the exclusive system that can make it
+/// ([`apply_component_writes`]).
+#[derive(Debug, Clone)]
+struct ComponentWrite {
+    entity: Entity,
+    name: String,
+    value: RubyData,
 }
 
 /// An argument of `Rubevy.ask`, after the name of what is being asked for.
@@ -286,6 +318,14 @@ pub struct ScriptWorld {
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
     requests: Vec<Request>,
+    /// The questions rubevy answers itself ([`RESERVED_KINDS`]) rather than handing to the
+    /// game: a component by name, and the entities that have one. They are kept apart from
+    /// [`ScriptWorld::requests`] at the moment they are made, so a game's own answering system
+    /// never sees a kind it does not know — and cannot answer one of these by mistake.
+    reflect_requests: Vec<Request>,
+    /// Component writes waiting for [`apply_component_writes`], which is the system that has a
+    /// `&mut World` to make them with.
+    component_writes: Vec<ComponentWrite>,
     /// Answers still being worked out on Bevy's task pool ([`ScriptWorld::answer_with`]), each
     /// with the request it belongs to. [`deliver_answers`] takes them off as they finish.
     answering: Vec<(Request, Task<Answer>)>,
@@ -311,6 +351,12 @@ impl ScriptWorld {
         // one process each have their own (`Vm::set_host_state`)
         vm.set_host_state(HostState::default());
         let entity_class = install_host_api(&mut vm);
+        // the Ruby half of the host API (`src/prelude.rb`), which is Ruby because each method
+        // in it waits for an answer and a native cannot be parked
+        if let Err(e) = vm.load_and_run(PRELUDE) {
+            let message = vm.describe_error(&e);
+            return Err(format!("prelude: {message}"));
+        }
         // An entity object owns nothing on the host's side — its handle *is* `Entity::to_bits`,
         // and the ECS is what says whether that entity still exists — so there is nothing to
         // release here. The hook is registered all the same: it is the place a kind of Data that
@@ -334,6 +380,8 @@ impl ScriptWorld {
             overrun: Some(std::time::Duration::from_millis(50)),
             tick_remainder: 0.0,
             requests: Vec::new(),
+            reflect_requests: Vec::new(),
+            component_writes: Vec::new(),
             answering: Vec::new(),
             entity_class,
             freed_entities,
@@ -382,27 +430,41 @@ impl ScriptWorld {
     /// Answers a request: the script's `Rubevy.ask` returns this value and its task becomes
     /// ready again. The queue is let go of here, so answer each request once.
     pub fn answer(&mut self, request: &Request, answer: Answer) {
-        let value = match answer {
-            Answer::Nil => Value::Nil,
-            Answer::Bool(b) => Value::bool(b),
-            Answer::Num(n) => Value::Float(n),
-            Answer::Text(t) => self.vm.str_new(t.as_bytes()),
-            Answer::List(ns) => {
-                let items: Vec<Value> = ns.into_iter().map(Value::Float).collect();
-                self.vm.ary_new(items)
-            }
-            Answer::Entity(e) => self.vm.data_new(self.entity_class, ENTITY_TAG, e.to_bits()),
-            Answer::Rows(rows) => {
-                let items: Vec<Value> = rows
-                    .into_iter()
-                    .map(|row| {
-                        let cells: Vec<Value> = row.into_iter().map(Value::Float).collect();
-                        self.vm.ary_new(cells)
-                    })
-                    .collect();
-                self.vm.ary_new(items)
-            }
-        };
+        let value = answer_value(&mut self.vm, answer, self.entity_class);
+        self.push_answer(request, value);
+    }
+
+    /// Answers a request with a value built inside the VM.
+    ///
+    /// [`Answer`] is flat — numbers, a string, a list of numbers, a table of them — because
+    /// that is what a game asking about the world usually has. A component read by name is not
+    /// flat (`{translation: [x, y, z], rotation: [x, y, z, w]}`), and nesting [`Answer`] to
+    /// carry it would be a second, poorer copy of what the VM can already build. So the host is
+    /// handed the `Vm` and builds the value with `hash_new` / `hash_set` / `ary_new` /
+    /// `str_new`, or with sabiruby's `IntoRuby`:
+    ///
+    /// ```no_run
+    /// # use rubevy::{Request, ScriptWorld};
+    /// # use sabiruby::Value;
+    /// fn answer_inventory(world: &mut ScriptWorld, request: &Request) {
+    ///     world.answer_value(request, |vm| {
+    ///         let h = vm.hash_new();
+    ///         let k = Value::Sym(vm.intern("gold"));
+    ///         let _ = vm.hash_set(h, k, Value::Int(12));
+    ///         h
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// The closure runs at once, inside this call, and the same rule holds as for
+    /// [`ScriptWorld::answer`]: answer each request once. Nothing in the closure may park a
+    /// task — it is host code, not a script.
+    pub fn answer_value(&mut self, request: &Request, build: impl FnOnce(&mut Vm) -> Value) {
+        let value = build(&mut self.vm);
+        self.push_answer(request, value);
+    }
+
+    fn push_answer(&mut self, request: &Request, value: Value) {
         if let Err(e) = self.vm.task_queue_push(request.queue, value) {
             let message = self.vm.describe_error(&e);
             error!("rubevy: could not answer {}: {message}", request.kind);
@@ -456,6 +518,152 @@ impl ScriptWorld {
     pub fn answering(&self) -> usize {
         self.answering.len()
     }
+
+    /// Sends a message to the scripts that asked for it (`Rubevy.subscribe`).
+    ///
+    /// `entity` is who it is about: `Some(e)` reaches only the scripts on that entity, `None`
+    /// every script that subscribed to the name. Nothing is queued for a name nobody
+    /// subscribed to, so a game may publish freely.
+    ///
+    /// A Bevy event reaches Ruby by a game writing the one line that turns it into this — an
+    /// observer, or an ordinary system reading its messages:
+    ///
+    /// ```no_run
+    /// # use bevy::prelude::*;
+    /// # use rubevy::{Answer, ScriptWorld};
+    /// # #[derive(EntityEvent)]
+    /// # struct Hit { entity: Entity, damage: f32 }
+    /// # fn build(app: &mut App) {
+    /// app.add_observer(|on: On<Hit>, mut scripts: ResMut<ScriptWorld>| {
+    ///     scripts.publish(Some(on.entity), "hit", Answer::Num(on.damage as f64));
+    /// });
+    /// # }
+    /// ```
+    ///
+    /// rubevy does not tie Bevy's event types to Ruby by itself: which events a script may see,
+    /// and what each one carries, is the game's to say.
+    ///
+    /// **A queue that nobody reads.** A script parked on something else — or one that is
+    /// simply slower than the game — is not made to keep up. Each queue holds
+    /// [`Self::QUEUE_LIMIT`] messages; past that the oldest is dropped so that the newest is
+    /// there. A script that wakes late gets the last 64 things that happened, not the first 64.
+    pub fn publish(&mut self, entity: Option<Entity>, name: &str, payload: Answer) {
+        let entity_class = self.entity_class;
+        self.publish_value(entity, name, move |vm| answer_value(vm, payload.clone(), entity_class));
+    }
+
+    /// [`ScriptWorld::publish`] with the message built inside the VM, for a payload that is not
+    /// flat — a Hash, a list with an entity in it. The closure runs once per subscriber.
+    pub fn publish_value(
+        &mut self,
+        entity: Option<Entity>,
+        name: &str,
+        mut build: impl FnMut(&mut Vm) -> Value,
+    ) {
+        let queues: Vec<ObjId> = match self.vm.host_state::<HostState>() {
+            Some(state) => state
+                .subscriptions
+                .iter()
+                .filter(|s| s.name == name && (entity.is_none() || s.entity == entity))
+                .map(|s| s.queue)
+                .collect(),
+            None => return,
+        };
+        for queue in queues {
+            self.make_room(queue);
+            let value = build(&mut self.vm);
+            if let Err(e) = self.vm.task_queue_push(queue, value) {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: could not publish {name}: {message}");
+            }
+        }
+    }
+
+    /// How many messages a subscriber's queue holds before the oldest is dropped.
+    ///
+    /// A queue with no limit is a leak with a slow fuse: a script that subscribes and then
+    /// waits on something else would hold every message the game ever sent. 64 is enough for a
+    /// script that reads its queue every few frames, and small enough that a script that never
+    /// reads costs nothing to speak of.
+    pub const QUEUE_LIMIT: usize = 64;
+
+    /// Drops the oldest messages until there is room for one more.
+    fn make_room(&mut self, queue: ObjId) {
+        let size = self.vm.intern("size");
+        // `Task::Queue` has no non-blocking pop on the Rust side, so the two are Ruby's own
+        // (`__pop_try(true)` answers the item where there is one, and there is one here)
+        let pop = self.vm.intern("__pop_try");
+        loop {
+            let n = match self.vm.funcall(Value::Obj(queue), size, &[], Value::Nil) {
+                Ok(Value::Int(n)) => n as usize,
+                _ => return,
+            };
+            if n < Self::QUEUE_LIMIT {
+                return;
+            }
+            if self.vm.funcall(Value::Obj(queue), pop, &[Value::True], Value::Nil).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// The `Rubevy::Entity` class, for a host that builds a value of its own inside
+    /// [`ScriptWorld::answer_value`] or [`ScriptWorld::publish_value`]: read it before the call
+    /// and hand it to [`entity_object`] inside. [`Answer::Entity`] is the way where the whole
+    /// answer is one entity; this is for an entity inside a list or a Hash.
+    pub fn entity_class(&self) -> ObjId {
+        self.entity_class
+    }
+
+    /// How many subscriptions are standing, for a HUD or a test.
+    pub fn subscriptions(&self) -> usize {
+        self.vm.host_state::<HostState>().map(|s| s.subscriptions.len()).unwrap_or(0)
+    }
+
+    /// Lets go of what an entity's script subscribed to. Called where a script's task ends and
+    /// where its [`ScriptTask`] is removed: a queue nobody will ever read is a queue the game
+    /// would keep filling.
+    fn unsubscribe(&mut self, entity: Entity) {
+        let Some(state) = self.vm.host_state_mut::<HostState>() else { return };
+        let mut dropped = Vec::new();
+        state.subscriptions.retain(|s| {
+            if s.entity == Some(entity) {
+                dropped.push(s.queue);
+                false
+            } else {
+                true
+            }
+        });
+        for queue in dropped {
+            self.vm.gc_unregister(queue);
+        }
+    }
+}
+
+/// The Ruby value for an [`Answer`], which is what both [`ScriptWorld::answer`] and
+/// [`ScriptWorld::publish`] send.
+fn answer_value(vm: &mut Vm, answer: Answer, entity_class: ObjId) -> Value {
+    match answer {
+        Answer::Nil => Value::Nil,
+        Answer::Bool(b) => Value::bool(b),
+        Answer::Num(n) => Value::Float(n),
+        Answer::Text(t) => vm.str_new(t.as_bytes()),
+        Answer::List(ns) => {
+            let items: Vec<Value> = ns.into_iter().map(Value::Float).collect();
+            vm.ary_new(items)
+        }
+        Answer::Entity(e) => vm.data_new(entity_class, ENTITY_TAG, e.to_bits()),
+        Answer::Rows(rows) => {
+            let items: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let cells: Vec<Value> = row.into_iter().map(Value::Float).collect();
+                    vm.ary_new(cells)
+                })
+                .collect();
+            vm.ary_new(items)
+        }
+    }
 }
 
 /// Nanoseconds since the first call, on Bevy's `Instant` (which is also there in a browser).
@@ -480,6 +688,22 @@ fn enable_scheduler_gc(vm: &mut Vm) -> Result<(), String> {
 struct HostState {
     /// The queue a native writes and [`drain_commands`] reads.
     commands: Vec<HostCommand>,
+    /// What the scripts are listening for (`Rubevy.subscribe`), in the order they asked.
+    subscriptions: Vec<Subscription>,
+}
+
+/// One `Rubevy.subscribe(:hit)`: the queue it answered with, and whose script it belongs to.
+///
+/// It lives in the VM's host state beside the command queue, because the native that makes it
+/// has the `Vm` and nothing else. [`ScriptWorld::publish`] reads it back through the same
+/// `&mut Vm`.
+#[derive(Debug, Clone)]
+struct Subscription {
+    /// The entity the subscribing script is attached to, where it has one. A message sent to
+    /// an entity reaches only the subscriptions of that entity's scripts.
+    entity: Option<Entity>,
+    name: String,
+    queue: ObjId,
 }
 
 fn push_command(vm: &mut Vm, c: HostCommand) {
@@ -556,7 +780,18 @@ impl Plugin for RubevyPlugin {
             .init_asset_loader::<MrbLoader>()
             .add_message::<ScriptEnded>()
             .insert_resource(world)
-            .add_systems(Update, (start_scripts, deliver_answers, tick_scripts, drain_commands).chain());
+            .add_systems(
+                Update,
+                (
+                    start_scripts,
+                    deliver_answers,
+                    answer_components,
+                    tick_scripts,
+                    drain_commands,
+                    apply_component_writes,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -643,6 +878,10 @@ fn tick_scripts(
         let text = world.vm.inspect_str(value).unwrap_or_else(|_| String::from("?"));
         ended.write(ScriptEnded { entity, status, value: text });
         world.vm.gc_unregister(st.task);
+        // A script that runs to its end keeps its `ScriptTask` — that is what stops it starting
+        // again — so the `on_remove` hook is not reached here. What it subscribed to is let go
+        // of all the same: the script will never read those queues.
+        world.unsubscribe(entity);
         commands.entity(entity).insert(ScriptDone);
     }
 }
@@ -709,8 +948,20 @@ fn drain_commands(
         match c {
             HostCommand::Ask { entity, kind, args, queue } => {
                 // parked scripts wait here until a system of the game answers
-                // (`ScriptWorld::take_requests` / `answer`)
-                world.requests.push(Request { entity: entity_from_bits(entity), kind, args, queue });
+                // (`ScriptWorld::take_requests` / `answer`) — except the handful of kinds
+                // rubevy answers itself, which are sorted out here rather than left for a
+                // game's system to skip over
+                let request = Request { entity: entity_from_bits(entity), kind, args, queue };
+                if RESERVED_KINDS.contains(&request.kind.as_str()) {
+                    world.reflect_requests.push(request);
+                } else {
+                    world.requests.push(request);
+                }
+            }
+            HostCommand::SetComponent { entity, name, value } => {
+                if let Some(entity) = entity_from_bits(entity) {
+                    world.component_writes.push(ComponentWrite { entity, name, value });
+                }
             }
             HostCommand::Log(text) => info!("[script] {text}"),
             HostCommand::Spawn { name, x, y, z } => {
@@ -736,7 +987,171 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
     Entity::try_from_bits(bits)
 }
 
+// ------------------------------------------------------------------ components by name
+
+/// The `Rubevy.ask` kinds rubevy answers itself, in [`answer_components`]. A game never sees
+/// them in [`ScriptWorld::take_requests`], and a game that wants these names for itself has to
+/// pick others.
+///
+/// They are what `src/prelude.rb` sends: `Rubevy::Entity#[]`, `#has?`, `#components`, and
+/// `Rubevy.find`.
+const RESERVED_KINDS: [&str; 4] = ["component.get", "component.has", "components", "entities.with"];
+
+/// Answers the questions about components, at the head of the frame and before the scripts
+/// run.
+///
+/// A question asked on one frame is answered at the head of the next: the `Rubevy.ask` leaves
+/// a command behind, [`drain_commands`] turns it into a request at the end of that frame, and
+/// this system answers it before [`tick_scripts`] resumes the script. So a read costs one
+/// frame of waiting, which is the shape to write scripts in — touch components when something
+/// happens (at the start, on an event, after a `sleep`), not a dozen times a frame. The task is
+/// parked meanwhile and costs nothing; the other scripts keep running.
+///
+/// What is reachable here is what is registered: a type with `#[derive(Reflect)]`,
+/// `#[reflect(Component)]` and `app.register_type::<T>()`. Bevy registers its own
+/// (`Transform`, `Visibility`, `Name`, …) in the plugins that own them — `TransformPlugin` for
+/// `Transform`, which `MinimalPlugins` does not add. An unregistered type is not an error: the
+/// component reads as `nil`, `has?` as `false`, and it is not in `components`.
+fn answer_components(world: &mut World) {
+    if world.resource::<ScriptWorld>().reflect_requests.is_empty() {
+        return;
+    }
+    let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else {
+        warn!("rubevy: no AppTypeRegistry, so no component is reachable by name");
+        let mut scripts = world.resource_mut::<ScriptWorld>();
+        for request in std::mem::take(&mut scripts.reflect_requests) {
+            scripts.answer(&request, Answer::Nil);
+        }
+        return;
+    };
+    let registry = registry.read();
+    world.resource_scope(|world: &mut World, mut scripts: Mut<ScriptWorld>| {
+        let world = &*world;
+        let entity_class = scripts.entity_class;
+        for request in std::mem::take(&mut scripts.reflect_requests) {
+            // the component's short name (`"Transform"`), or its whole path where two types
+            // share the short one (`"my_game::Hp"`)
+            let named = |i: usize| -> Option<&bevy::reflect::TypeRegistration> {
+                let name = request.text(i)?;
+                registry
+                    .get_with_short_type_path(name)
+                    .or_else(|| registry.get_with_type_path(name))
+            };
+            match request.kind.as_str() {
+                "component.get" => {
+                    let value = named(1)
+                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                        .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
+                        .and_then(|(rc, entity)| rc.reflect(entity));
+                    match value {
+                        Some(value) => scripts.answer_value(&request, |vm| {
+                            reflect::reflect_to_ruby(
+                                vm,
+                                value.as_partial_reflect(),
+                                entity_class,
+                                ENTITY_TAG,
+                            )
+                        }),
+                        None => scripts.answer(&request, Answer::Nil),
+                    }
+                }
+                "component.has" => {
+                    let has = named(1)
+                        .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                        .zip(request.entity_arg(0).and_then(|e| world.get_entity(e).ok()))
+                        .is_some_and(|(rc, entity)| rc.contains(entity));
+                    scripts.answer(&request, Answer::Bool(has));
+                }
+                "components" => {
+                    let mut names: Vec<String> = Vec::new();
+                    if let Some(entity) = request.entity_arg(0).and_then(|e| world.get_entity(e).ok())
+                    {
+                        for registration in registry.iter() {
+                            let Some(rc) =
+                                registration.data::<bevy::ecs::reflect::ReflectComponent>()
+                            else {
+                                continue;
+                            };
+                            if rc.contains(entity) {
+                                names.push(
+                                    registration.type_info().type_path_table().short_path().to_string(),
+                                );
+                            }
+                        }
+                    }
+                    // the registry is a map, so its order is not the same twice; a script that
+                    // prints this wants it to read the same every run
+                    names.sort();
+                    scripts.answer_value(&request, |vm| {
+                        let items: Vec<Value> =
+                            names.iter().map(|n| vm.str_new(n.as_bytes())).collect();
+                        vm.ary_new(items)
+                    });
+                }
+                "entities.with" => {
+                    let mut found: Vec<Entity> = Vec::new();
+                    if let Some(rc) =
+                        named(0).and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+                    {
+                        // every entity in the world: this is the lookup the rustdoc of
+                        // `Rubevy.find` warns is not for every frame
+                        for entity in world.iter_entities() {
+                            if rc.contains(entity) {
+                                found.push(entity.id());
+                            }
+                        }
+                    }
+                    scripts.answer_value(&request, |vm| {
+                        let items: Vec<Value> = found
+                            .iter()
+                            .map(|e| vm.data_new(entity_class, ENTITY_TAG, e.to_bits()))
+                            .collect();
+                        vm.ary_new(items)
+                    });
+                }
+                _ => scripts.answer(&request, Answer::Nil),
+            }
+        }
+    });
+}
+
+/// Writes what the scripts put on components this frame (`entity[:Transform] = hash`).
+///
+/// It runs after [`drain_commands`], at the end of the frame, which is the promise `Commands`
+/// makes and the one `Rubevy.spawn` already made: a script's write is seen by the next frame,
+/// not in the middle of this one.
+fn apply_component_writes(world: &mut World) {
+    if world.resource::<ScriptWorld>().component_writes.is_empty() {
+        return;
+    }
+    let writes = std::mem::take(&mut world.resource_mut::<ScriptWorld>().component_writes);
+    let Some(registry) = world.get_resource::<AppTypeRegistry>().cloned() else { return };
+    let registry = registry.read();
+    for write in writes {
+        let Some(rc) = registry
+            .get_with_short_type_path(&write.name)
+            .or_else(|| registry.get_with_type_path(&write.name))
+            .and_then(|r| r.data::<bevy::ecs::reflect::ReflectComponent>())
+        else {
+            warn!("rubevy: no registered component named {}", write.name);
+            continue;
+        };
+        let Ok(mut entity) = world.get_entity_mut(write.entity) else { continue };
+        let Some(mut value) = rc.reflect_mut(&mut entity) else {
+            warn!("rubevy: {} has no {}", write.entity, write.name);
+            continue;
+        };
+        if let Err(e) = reflect::apply_ruby(value.as_partial_reflect_mut(), &write.value) {
+            warn!("rubevy: {} was not written whole: {e}", write.name);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ the Ruby side
+
+/// The Ruby half of the host API, run when the VM starts: `Rubevy::Entity#[]` and the rest
+/// (`src/prelude.rb`, compiled by `tools/compile_scripts.sh`).
+const PRELUDE: &[u8] = include_bytes!("prelude.mrb");
 
 /// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
 /// scripts Data objects of its own picks other numbers.
@@ -871,6 +1286,53 @@ fn install_host_api(vm: &mut Vm) -> ObjId {
         push_command(vm, HostCommand::Ask { entity, kind, args, queue });
         Ok(Value::Obj(queue))
     });
+    // `entity[:Transform] = hash` goes through here (`src/prelude.rb`). It is a command rather
+    // than a question: the script does not wait for it, and the write lands with the frame's
+    // other commands. The Hash is read out of the VM now, while there is a `&mut Vm`;
+    // `apply_component_writes` has the world but no VM.
+    vm.define_closure(sc, "set_component", |vm, _s, a, _b| {
+        let bits = entity_arg(vm, a.first())?;
+        let name = match a.get(1) {
+            Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
+            None => return Err(vm.raise_arg("set_component needs the name of a component")),
+        };
+        let value = reflect::read_ruby(vm, a.get(2).copied().unwrap_or(Value::Nil), ENTITY_TAG)?;
+        push_command(vm, HostCommand::SetComponent { entity: bits, name, value });
+        Ok(Value::Nil)
+    });
+    // `hits = Rubevy.subscribe(:hit)` — a `Task::Queue` the game pushes messages onto
+    // (`ScriptWorld::publish`). It is the same kind of queue `Rubevy.ask` answers on, so a
+    // script waits on it the same way, in this task or in one of its own.
+    vm.define_closure(sc, "subscribe", |vm, _s, a, _b| {
+        let name = match a.first() {
+            Some(Value::Sym(s)) => vm.sym_name(*s),
+            Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
+            None => return Err(vm.raise_arg("subscribe needs what to listen for")),
+        };
+        // A subscription belongs to an entity's script: that is who a message addressed to an
+        // entity reaches, and it is what says when to let the queue go. A task a script made
+        // with `Task.new` carries no entity, so it subscribes through the script that made it
+        // and shares the queue — which is the shape the waiting task wants anyway.
+        let entity = match current_entity(vm) {
+            Value::Int(bits) => entity_from_bits(bits as u64),
+            _ => None,
+        };
+        let Some(entity) = entity else {
+            return Err(vm.raise_arg(
+                "subscribe from the script's own task (a Task.new task has no entity)",
+            ));
+        };
+        let queue = vm.task_queue_new()?;
+        vm.gc_register(queue);
+        match vm.host_state_mut::<HostState>() {
+            Some(state) => {
+                state.subscriptions.push(Subscription { entity: Some(entity), name, queue })
+            }
+            // no host state is no plugin; let go of the queue rather than leave it rooted
+            None => vm.gc_unregister(queue),
+        }
+        Ok(Value::Obj(queue))
+    });
     vm.define_closure(sc, "set_position", |vm, _s, a, _b| {
         let bits = entity_arg(vm, a.first())?;
         let (x, y, z) = (num(vm, a.get(1)), num(vm, a.get(2)), num(vm, a.get(3)));
@@ -899,6 +1361,27 @@ fn num(vm: &Vm, v: Option<&Value>) -> f32 {
 
 /// So the type is named in the public API even where nothing else uses it.
 pub type ScriptVmError = VmError;
+
+/// The `Rubevy::Entity` object for an entity, built inside a closure that has the `Vm`
+/// ([`ScriptWorld::answer_value`], [`ScriptWorld::publish_value`]).
+///
+/// `class` is [`ScriptWorld::entity_class`], read before the closure runs:
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use rubevy::{entity_object, ScriptWorld};
+/// # use sabiruby::Value;
+/// fn hit(world: &mut ScriptWorld, who: Entity, hurt: Entity) {
+///     let class = world.entity_class();
+///     world.publish_value(Some(hurt), "hit", move |vm| {
+///         let who = entity_object(vm, class, who);
+///         vm.ary_new(vec![who, Value::Float(2.5)])
+///     });
+/// }
+/// ```
+pub fn entity_object(vm: &mut Vm, class: ObjId, entity: Entity) -> Value {
+    vm.data_new(class, ENTITY_TAG, entity.to_bits())
+}
 
 /// The entity ids the plugin hands to Ruby are `Entity::to_bits`; this is the
 /// way back, for a host that wants to read what a script asked about.

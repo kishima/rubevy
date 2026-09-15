@@ -17,6 +17,7 @@ command behind and the `drain_commands` system carries it out later in the same 
 | `Rubevy.entity` | the entity this script is attached to, as a `Rubevy::Entity`, or nil |
 | `Rubevy.move_to x, y, z` | the script's own entity is moved |
 | `Rubevy.set_position entity, x, y, z` | any entity is moved |
+| `entity[:Transform] = hash` | the fields the Hash names are written over that component |
 
 ## What an entity is, on the Ruby side
 
@@ -125,6 +126,129 @@ thread puts `multi_threaded` in the features of its own `bevy` dependency; this 
 `dev-dependencies` do that for the example and the tests. Either way the app needs Bevy's
 `TaskPoolPlugin`, which `MinimalPlugins` and `DefaultPlugins` both add — `answer_with` panics
 without it, because the pool it spawns on does not exist.
+
+## Components by name
+
+A script reads a component as a Hash of its fields and writes one back by naming the fields it
+means. Nothing in rubevy knows what a `Transform` is: the plugin walks whatever Bevy's type
+registry holds, through `ReflectComponent`, so a game's own component works the same way.
+
+```ruby
+e  = Rubevy.entity
+tf = e.get(:Transform)          # {translation: [x, y, z], rotation: [x, y, z, w], scale: [...]}
+tf[:translation][0] += 1.0
+e[:Transform] = tf              # applied after this frame's scripts have run
+
+e.has?(:Velocity)               # true / false
+e.components                    # ["Transform", "Sprite", ...] — the short type names, sorted
+Rubevy.find(:Npc)               # every entity with that component, as Rubevy::Entity objects
+```
+
+**What a type has to do to be there.** `#[derive(Reflect)]`, `#[reflect(Component)]`, and
+`app.register_type::<T>()`. Bevy's own types are registered by the app — `DefaultPlugins` does
+it, and `MinimalPlugins` does not, so `examples/components.rs` names `Transform` itself (in
+bevy 0.19 even `TransformPlugin` only propagates transforms; the automatic registration is
+bevy's `reflect_auto_register` feature, which this crate does not turn on). A type nobody
+registered is not an error on the Ruby side: the component reads as `nil`, `has?` answers
+`false`, and it is not in `components`.
+
+**What a value looks like.**
+
+| reflected | Ruby |
+|---|---|
+| struct | Hash, keys as Symbols |
+| `Vec2` / `Vec3` / `Vec3A` / `Vec4` / `Quat` | Array of Floats — they are structs of `x`, `y`, … in bevy_reflect, but `tf[:translation][0]` is what a script wants |
+| tuple struct, tuple, array, list, set | Array |
+| map | Hash |
+| enum, unit variant | the variant's name as a Symbol (`:Hidden`) |
+| enum, tuple or struct variant | a one-entry Hash, `{Srgba: {red: …}}` |
+| numbers, `bool`, String, `char` | the Ruby ones |
+| `Entity` | a `Rubevy::Entity` object, not a number |
+| anything else opaque | nil |
+
+**What a write does.** Only the fields the Hash names, so `e[:Hp] = { current: 4.0 }` leaves
+`max` alone and two scripts that touch different fields do not undo each other — and reading a
+component, changing one number and writing it back is one round trip, not two. An Array over a
+struct goes by position, which is how `[1.0, 2.0, 3.0]` reaches a `Vec3`. A Symbol switches an
+enum to that variant, as long as the variant has no fields: bevy builds a new variant from the
+value handed to it, and a Ruby Hash says nothing about types, so a tuple or struct variant can
+only have its fields written while it is already the current one. A field that cannot take what
+it was given is logged with its path (`translation.x: takes a number`) and skipped; the rest of
+the write still happens.
+
+**A read costs a frame.** `e.get(:Transform)` is `Rubevy.ask` under a nicer name: the question
+goes out with the frame's commands and rubevy answers it at the head of the next frame, before
+the scripts run. The task is parked meanwhile, so it costs nothing and the other scripts keep
+running, but this is a boundary for declaration time and for events — not for a dozen reads a
+frame. `Rubevy.find` walks every entity in the world, so it is for a lookup now and then.
+
+The four kinds rubevy answers itself — `component.get`, `component.has`, `components`,
+`entities.with` — never reach `ScriptWorld::take_requests`: they are sorted out where the
+request is made, so a game's answering system sees only its own. A game that wants those names
+picks others.
+
+**Why `get` and not `[]`.** mrbc folds a one-argument `[]` into `OP_GETIDX`, which the VM
+dispatches with `funcall` — a nested run loop, which is a native boundary, and a task cannot be
+parked across one (`blocking pop cannot be called from within a C function boundary`). A plain
+call is dispatched in the caller's frame and may wait. `[]=` has no such trouble, because
+writing waits for nothing. The Ruby side of all this is `src/prelude.rb`, compiled to `.mrb` and
+run when the VM starts, so a script has these without requiring anything.
+
+## Events
+
+`Rubevy.subscribe(:hit)` answers a `Task::Queue` that a game pushes onto. Waiting for something
+to happen is then the same thing as waiting for an answer — the task is parked and costs
+nothing — and it can be done in a task of the script's own:
+
+```ruby
+hits = Rubevy.subscribe(:hit)          # this entity's own, and everyone's
+Task.new(name: "reflex") do
+  loop do
+    by, damage = hits.pop              # parked here until the game publishes
+    Rubevy.log "hit by #{by.inspect} for #{damage}"
+  end
+end
+```
+
+A reflex is then not a callback that interrupts the brain; it is another task that happens to be
+ready. Subscribe in the script's own task — a task made with `Task.new` has no entity, so it
+cannot be subscribed for (rubevy raises rather than making a queue nothing will ever close) —
+and share the queue with the tasks that read it, as above.
+
+The game publishes:
+
+```rust
+scripts.publish(Some(entity), "hit", Answer::Num(damage as f64));   // that entity's scripts
+scripts.publish(None, "bell", Answer::Num(frame as f64));           // everyone who subscribed
+```
+
+and for a payload that is not flat, `publish_value(entity, name, |vm| …)` builds the value
+inside the VM, the way `answer_value` does. An entity inside a list is
+`entity_object(vm, class, entity)`, with `class` read from `ScriptWorld::entity_class()` before
+the closure.
+
+**Bevy's events are joined by the game, one line per event type.** rubevy does not tie them to
+Ruby by itself: which events a script may see, and what each one carries, is the game's to say.
+
+```rust
+app.add_observer(|on: On<Hit>, mut scripts: ResMut<ScriptWorld>| {
+    scripts.publish(Some(on.entity), "hit", Answer::Num(on.damage as f64));
+});
+```
+
+An ordinary system reading `MessageReader` does just as well. `examples/events.rs` has both, and
+a script (`assets/scripts/events.rb`) with a brain and a reflex.
+
+**Rules.**
+
+* Nothing is queued for a name nobody subscribed to, so a game may publish freely.
+* A queue holds `ScriptWorld::QUEUE_LIMIT` (64) messages and drops the oldest past that. A
+  script that wakes late gets the last 64 things that happened, not the first 64 — and a script
+  that never reads its queue is not a leak with a slow fuse.
+* A subscription is let go of when the script's task ends and when its `ScriptTask` is removed
+  (a reload, a despawn). A script that runs off its end keeps its `ScriptTask` — that is what
+  stops it starting again — so both places matter. `ScriptWorld::subscriptions()` says how many
+  are standing.
 
 ## A dynamic proxy (`Rubevy::Proxy`)
 
