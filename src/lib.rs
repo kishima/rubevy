@@ -48,7 +48,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 
-use sabiruby::convert::{DataRef, This};
+use sabiruby::convert::{DataRef, FromRuby, This};
 use sabiruby::value::ObjId;
 use sabiruby::{Value, Vm, VmError};
 
@@ -209,6 +209,90 @@ struct ComponentWrite {
     value: RubyData,
 }
 
+/// Where a [`RootedValue`] that has been dropped leaves its object until the next sweep
+/// ([`ScriptWorld::release_dropped_values`]).
+///
+/// A `Drop` is not given the `Vm` — it is given nothing at all — so letting go of a value is
+/// two steps: dropping the last handle puts the object here, and the next sweep, which has the
+/// `&mut Vm`, calls `Vm::gc_unregister` on it. In between the object is still registered, which
+/// is the safe side of the mistake: it lives a little longer than it had to, and never a moment
+/// less.
+type ReleaseQueue = std::sync::Arc<std::sync::Mutex<Vec<ObjId>>>;
+
+/// A Ruby value that an [`Arg`] carries, kept alive for as long as anything holds it.
+///
+/// A Hash or an Array a script passed to `Rubevy.ask` is *not* copied out of the VM the way a
+/// component write is ([`Arg::Value`] explains why): the host is handed the value itself, so
+/// it has to be told not to collect it. `Vm::gc_register` is that telling, and the pair to it
+/// is what leaks if a game forgets it — so nothing here asks a game to remember. The
+/// registration is made once, when the argument is read in the `Rubevy.ask` native, and is
+/// owned by an `Arc` that every clone of the [`Request`] shares. When the last of them goes —
+/// answered, dropped on the floor, lost with a system that panicked — the `Drop` puts the
+/// object on a queue and the next frame's sweep unregisters it.
+///
+/// So a [`Request`] can stay `Clone` and be kept for as many frames as a game likes, and the
+/// only way to keep a value alive for ever is to keep a `Request` alive for ever.
+///
+/// Read the value with the `Vm` it belongs to — `vm.ary_vals(v.value())`,
+/// `vm.hash_entries(v.value())`, or [`Request::arg_as`].
+#[derive(Debug, Clone)]
+pub struct RootedValue {
+    value: Value,
+    /// `None` for an immediate (`nil`, `true`, `false`): there is no heap object to register.
+    ///
+    /// Nothing reads this, which is the whole of its job: the registration lasts exactly as
+    /// long as the last clone of this field, and ends in its `Drop`.
+    #[allow(dead_code)]
+    root: Option<std::sync::Arc<Root>>,
+}
+
+/// The one registration behind a [`RootedValue`] and all its clones.
+#[derive(Debug)]
+struct Root {
+    id: ObjId,
+    release: ReleaseQueue,
+}
+
+impl Drop for Root {
+    fn drop(&mut self) {
+        // `lock` only fails where another thread panicked holding it; the queue is still a
+        // queue, and dropping the id here instead would be the leak this whole type is against
+        let mut queue = match self.release.lock() {
+            Ok(q) => q,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        queue.push(self.id);
+    }
+}
+
+impl RootedValue {
+    /// Registers `v` with the collector, where it is a heap object, and takes charge of letting
+    /// it go again.
+    fn new(vm: &mut Vm, v: Value, release: &ReleaseQueue) -> RootedValue {
+        let root = match v {
+            Value::Obj(id) => {
+                vm.gc_register(id);
+                Some(std::sync::Arc::new(Root { id, release: release.clone() }))
+            }
+            _ => None,
+        };
+        RootedValue { value: v, root }
+    }
+
+    /// The value, to read through the `Vm` it came from.
+    pub fn value(&self) -> Value {
+        self.value
+    }
+}
+
+/// Two of these are equal when they name the same object — identity, not `==` in Ruby, which
+/// would need the `Vm` this does not hold.
+impl PartialEq for RootedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
 /// An argument of `Rubevy.ask`, after the name of what is being asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
@@ -218,26 +302,48 @@ pub enum Arg {
     /// [`Answer::Entity`] hand out, read back through its handle rather than through a number
     /// that has been past a `f64`.
     Entity(Entity),
+    /// Anything else: a Hash, an Array, an object of the script's own, `nil`, `true`, `false`.
+    ///
+    /// The three above are the fast paths — a number, a string and an entity are copied out of
+    /// the VM at the call and cost the host nothing afterwards — and this is what everything
+    /// else falls to. It is the value itself, kept alive by [`RootedValue`], not a copy: a
+    /// nested structure has no flat shape to be copied into, and building one would be a second
+    /// and poorer `Answer` (the same argument [`ScriptWorld::answer_value`] makes on the way
+    /// back).
+    ///
+    /// **Nothing inside is flattened.** `Rubevy.ask("path", [1.0, 2.0], {speed: 3})` is two
+    /// `Arg::Value`s, and the numbers inside the Array stay Ruby numbers inside a Ruby Array —
+    /// `request.num(0)` is `None`, not `1.0`. An argument is one `Arg`, and which one it is
+    /// depends on that argument alone, not on what is inside it. Read the contents with
+    /// [`Request::arg_as`] or through the `Vm`.
+    Value(RootedValue),
 }
 
 impl Arg {
     pub fn as_num(&self) -> Option<f64> {
         match self {
             Arg::Num(n) => Some(*n),
-            Arg::Text(_) | Arg::Entity(_) => None,
+            Arg::Text(_) | Arg::Entity(_) | Arg::Value(_) => None,
         }
     }
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Arg::Text(t) => Some(t),
-            Arg::Num(_) | Arg::Entity(_) => None,
+            Arg::Num(_) | Arg::Entity(_) | Arg::Value(_) => None,
         }
     }
     /// The entity, where the script passed a `Rubevy::Entity` object.
     pub fn as_entity(&self) -> Option<Entity> {
         match self {
             Arg::Entity(e) => Some(*e),
-            Arg::Num(_) | Arg::Text(_) => None,
+            Arg::Num(_) | Arg::Text(_) | Arg::Value(_) => None,
+        }
+    }
+    /// The Ruby value, where the argument was one of the sorts [`Arg::Value`] carries.
+    pub fn as_value(&self) -> Option<Value> {
+        match self {
+            Arg::Value(v) => Some(v.value()),
+            Arg::Num(_) | Arg::Text(_) | Arg::Entity(_) => None,
         }
     }
 }
@@ -293,6 +399,56 @@ impl Request {
     pub fn entity_arg(&self, i: usize) -> Option<Entity> {
         self.args.get(i).and_then(Arg::as_entity)
     }
+    /// The `i`th argument as the Ruby value it is, where it is one of the sorts
+    /// [`Arg::Value`] carries (a Hash, an Array, an object, `nil`, `true`, `false`).
+    ///
+    /// The value is alive for as long as this `Request` is — it is registered with the
+    /// collector — so a game may keep the request for a frame or ten and read it when the
+    /// answer is ready. Read it through the `Vm` in [`ScriptWorld::vm`]:
+    ///
+    /// ```no_run
+    /// # use rubevy::{Request, ScriptWorld};
+    /// fn speeds(world: &mut ScriptWorld, request: &Request) -> Vec<(String, f64)> {
+    ///     let Some(h) = request.value(0) else { return Vec::new() };
+    ///     // a Hash entry by entry, keys and values as they are
+    ///     let entries = world.vm.hash_entries(h).unwrap_or_default();
+    ///     entries
+    ///         .into_iter()
+    ///         .filter_map(|(k, v)| {
+    ///             let k = String::from_utf8_lossy(&world.vm.as_string(k).ok()?).into_owned();
+    ///             Some((k, f64::from_ruby(&mut world.vm, v).ok()?))
+    ///         })
+    ///         .collect()
+    /// }
+    /// # use sabiruby::convert::FromRuby;
+    /// ```
+    pub fn value(&self, i: usize) -> Option<Value> {
+        self.args.get(i).and_then(Arg::as_value)
+    }
+    /// The `i`th argument converted with sabiruby's [`FromRuby`], which is how a host system
+    /// takes a `Vec<f64>`, a `Vec<String>`, a `Vec<Vec<f64>>` or anything else that trait
+    /// knows:
+    ///
+    /// ```no_run
+    /// # use rubevy::{Request, ScriptWorld};
+    /// # fn f(world: &mut ScriptWorld, request: &Request) {
+    /// let waypoints: Vec<f64> = request.arg_as(&mut world.vm, 0).unwrap_or_default();
+    /// # }
+    /// ```
+    ///
+    /// `None` where there is no such argument, where it is not one [`Arg::Value`] carries (a
+    /// number, a string and an entity are already out of the VM — use [`Request::num`],
+    /// [`Request::text`] and [`Request::entity_arg`] for those), or where the value would not
+    /// convert. That last one is deliberately flattened into "no", the way the neighbours
+    /// answer `None` for an argument of another sort; a host that wants to see the `TypeError`
+    /// calls `T::from_ruby` on [`Request::value`] itself.
+    ///
+    /// A Hash has no `FromRuby` in the VM, so it is read with `Vm::hash_entries` — the example
+    /// on [`Request::value`].
+    pub fn arg_as<T: FromRuby>(&self, vm: &mut Vm, i: usize) -> Option<T> {
+        let v = self.value(i)?;
+        T::from_ruby(vm, v).ok()
+    }
 }
 
 /// Marks and names an entity a script spawned (`Rubevy.spawn`).
@@ -334,6 +490,9 @@ pub struct ScriptWorld {
     entity_class: ObjId,
     /// How many entity objects the collector has taken, counted by the free hook.
     freed_entities: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The objects of dropped [`Arg::Value`]s, waiting for a sweep with the `Vm`
+    /// ([`ScriptWorld::release_dropped_values`]). The `Rubevy.ask` native holds the other end.
+    release: ReleaseQueue,
 }
 
 impl ScriptWorld {
@@ -350,7 +509,8 @@ impl ScriptWorld {
         // the natives' side of the bridge lives in the VM, not in a static, so two `App`s in
         // one process each have their own (`Vm::set_host_state`)
         vm.set_host_state(HostState::default());
-        let entity_class = install_host_api(&mut vm);
+        let release: ReleaseQueue = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entity_class = install_host_api(&mut vm, release.clone());
         // the Ruby half of the host API (`src/prelude.rb`), which is Ruby because each method
         // in it waits for an answer and a native cannot be parked
         if let Err(e) = vm.load_and_run(PRELUDE) {
@@ -385,6 +545,7 @@ impl ScriptWorld {
             answering: Vec::new(),
             entity_class,
             freed_entities,
+            release,
         })
     }
 
@@ -418,6 +579,30 @@ impl ScriptWorld {
     /// and hand them back to [`ScriptWorld::answer`] on a later frame.
     pub fn take_requests(&mut self) -> Vec<Request> {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Lets the collector have the values of [`Request`]s that have been dropped
+    /// ([`Arg::Value`]), and answers how many. **The plugin does this at the head of every
+    /// frame, before the scripts run**; a game has nothing to call.
+    ///
+    /// It is here because the two halves of letting a value go happen in different places: the
+    /// `Drop` of the last handle knows *what* to release and has no `Vm`, and this has the `Vm`
+    /// and does not know what until it looks. Between the two the value is still registered, so
+    /// nothing is ever collected while a request still names it — a value simply outlives its
+    /// request by up to one frame. A host driving `ScriptWorld` without [`RubevyPlugin`]'s
+    /// systems calls this itself, or the registrations pile up.
+    pub fn release_dropped_values(&mut self) -> usize {
+        let ids = {
+            let mut queue = match self.release.lock() {
+                Ok(q) => q,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            std::mem::take(&mut *queue)
+        };
+        for id in &ids {
+            self.vm.gc_unregister(*id);
+        }
+        ids.len()
     }
 
     /// How many `Rubevy::Entity` objects the collector has taken since the VM started, as the
@@ -846,6 +1031,11 @@ fn tick_scripts(
     let frame_no = frame.0;
     let world = &mut *world;
 
+    // the values of requests nobody holds any more (`Arg::Value`) are let go of here, at the
+    // head of the frame: it is the last moment with the `Vm` before a script runs, so an
+    // object released now can be collected on the same frame it stopped being needed
+    world.release_dropped_values();
+
     // frame time in ticks, keeping what did not make a whole one for next frame
     let unit_ms = world.vm.task_tick_unit_ms() as f32;
     world.tick_remainder += delta * 1000.0 / unit_ms;
@@ -1209,7 +1399,10 @@ fn entity_arg(vm: &mut Vm, v: Option<&Value>) -> Result<u64, VmError> {
 /// entity objects. What they may not carry is the game — a native gets `&mut Vm` and nothing
 /// else — so everything that touches the world is left on the queue in the VM's host state
 /// ([`HostState`]) for [`drain_commands`].
-fn install_host_api(vm: &mut Vm) -> ObjId {
+///
+/// `release` is the other end of [`ScriptWorld::release_dropped_values`]: `Rubevy.ask` gives it
+/// to every [`RootedValue`] it makes, so that dropping one reaches the sweep.
+fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
     let m = vm.define_module("Rubevy");
     let entity_class = define_entity_class(vm, m);
     let sc = vm.singleton_class(Value::Obj(m)).expect("Rubevy singleton");
@@ -1253,7 +1446,7 @@ fn install_host_api(vm: &mut Vm) -> ObjId {
     });
     // `Rubevy.ask("scan", 40)` — the game answers it, this frame or a later one, and the script
     // waits on the queue meanwhile (its task is parked, so it costs nothing)
-    vm.define_closure(sc, "ask", |vm, _s, a, _b| {
+    vm.define_closure(sc, "ask", move |vm, _s, a, _b| {
         let kind = match a.first() {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("ask needs what to ask for")),
@@ -1270,14 +1463,20 @@ fn install_host_api(vm: &mut Vm) -> ObjId {
                 args.push(Arg::Entity(e));
                 continue;
             }
+            // a String, and only a String: the fast path copies the bytes out here, so the host
+            // has them without the VM
+            if let Some(bytes) = vm.str_bytes(*v) {
+                args.push(Arg::Text(String::from_utf8_lossy(bytes).into_owned()));
+                continue;
+            }
             args.push(match v {
                 Value::Int(i) => Arg::Num(*i as f64),
                 Value::Float(f) => Arg::Num(*f),
                 Value::Sym(s) => Arg::Text(vm.sym_name(*s).to_string()),
-                other => match vm.as_string(*other) {
-                    Ok(bytes) => Arg::Text(String::from_utf8_lossy(&bytes).into_owned()),
-                    Err(_) => Arg::Num(0.0),
-                },
+                // a Hash, an Array, an object of the script's own, `nil`: carried as the value
+                // it is, rather than through its `to_s` — which is what this used to do, and
+                // which threw away everything a structure was for
+                other => Arg::Value(RootedValue::new(vm, *other, &release)),
             });
         }
         let queue = vm.task_queue_new()?;

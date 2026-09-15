@@ -80,12 +80,77 @@ actually run.
 * A request you cannot answer yet is yours to keep; nothing expires. If the script should not wait
   forever, it can say so on the Ruby side: `Rubevy.ask(…).pop(timeout_ms: 500)` answers nil when
   the deadline passes.
-* `kind` is a string; the arguments after it are numbers, strings or entities ([`Arg`]), and
-  `Request::num(i)` / `Request::text(i)` / `Request::entity_arg(i)` read them — each answers
-  `None` for an argument of another sort. An answer is nil, a bool, a number, a string, an
-  entity, a list of numbers, or a table of them ([`Answer::Rows`] — every robot with its team
-  and hp, say). The boundary is deliberately that small: it is enough for a game to ask anything
-  and get a table back, without a serialisation format between the two.
+* `kind` is a string; the arguments after it are numbers, strings, entities, or any other Ruby
+  value ([`Arg`]), and `Request::num(i)` / `Request::text(i)` / `Request::entity_arg(i)` /
+  `Request::value(i)` read them — each answers `None` for an argument of another sort. An answer
+  is nil, a bool, a number, a string, an entity, a list of numbers, or a table of them
+  ([`Answer::Rows`] — every robot with its team and hp, say), or anything the host builds in the
+  VM itself (`answer_value`). The question's side is described below.
+
+## What a question may carry (`Arg`)
+
+Three sorts of argument are copied out of the VM at the call and cost the host nothing
+afterwards:
+
+| Ruby | `Arg` | read with |
+|---|---|---|
+| Integer, Float | `Arg::Num(f64)` | `request.num(i)`, `request.num_or(i, d)` |
+| String, Symbol | `Arg::Text(String)` | `request.text(i)` |
+| `Rubevy::Entity` | `Arg::Entity(Entity)` | `request.entity_arg(i)` |
+
+Everything else — a Hash, an Array, an object of the script's own, `nil`, `true`, `false` — is
+`Arg::Value`, which is the Ruby value **itself**, not a copy of it:
+
+```ruby
+Rubevy.ask("path", { from: [1.0, 2.0], to: [8.0, 3.0], avoid: ["lava"] }).pop
+```
+
+```rust
+for request in world.take_requests() {
+    // sabiruby's `FromRuby`, for anything that trait knows: Vec<f64>, Vec<String>, f64, …
+    let waypoints: Vec<f64> = request.arg_as(&mut world.vm, 0).unwrap_or_default();
+
+    // a Hash has no `FromRuby` in the VM, so it is read entry by entry
+    let h = request.value(0).expect("a value");
+    for (k, v) in world.vm.hash_entries(h).unwrap_or_default() {
+        let name = world.vm.as_string(k).unwrap_or_default();
+        // … `f64::from_ruby(&mut world.vm, v)`, `vm.ary_vals(v)`, `vm.hash_entries(v)`
+    }
+}
+```
+
+**Nothing inside is flattened.** An argument is one `Arg`, and which one it is depends on that
+argument alone: `Rubevy.ask("path", [1.0, 2.0], 3)` is an `Arg::Value` and an `Arg::Num`, and the
+numbers inside the Array stay Ruby numbers inside a Ruby Array (`request.num(0)` is `None`). The
+alternative — walking the structure and turning each leaf into an `Arg` — would lose the shape,
+which is the only thing the structure was for.
+
+**Why the value rather than a copy.** A component write (`entity[:Transform] = hash`) *is* copied
+out, because the write happens a system later, with a `&mut World` and no VM in sight. A question
+is the other way round: the host has the `ScriptWorld`, so it has the `Vm`, and copying a nested
+value out would mean a second and poorer `Answer` — the same argument `answer_value` makes on the
+way back. Before this, a Hash arrived as `Arg::Text` of its `to_s`, which threw away everything a
+structure was for.
+
+**How it is kept alive, and let go of.** The value is a value nothing in the VM points at any
+more — the script has parked on its queue, the frame that built the literal may have returned —
+so it lives only because `Vm::gc_register` says so. That registration is made once, in the
+`Rubevy.ask` native, and is owned by an `Arc` inside the `Request`. When the last `Request` naming
+it is dropped — answered and let go, dropped unanswered, lost with a system that panicked — the
+`Drop` puts the object on a queue and the plugin unregisters it at the head of the next frame
+(`ScriptWorld::release_dropped_values`, which a host driving `ScriptWorld` without the plugin's
+systems calls itself).
+
+So a game has nothing to remember. There is no `release(request)` to forget, `Request` stays
+`Clone` and may be kept for as many frames as the answer takes, and the only way to hold a value
+for ever is to hold a `Request` for ever. The cost of the two-step release is that a value
+outlives its request by up to one frame, which is the safe side of the mistake.
+
+`tests/ask_value.rs` checks all of it against a real collection: a Hash and an Array asked for
+inside a method (so the script itself holds nothing), a `GC.start` in the script and a
+`Vm::gc_collect` between `take_requests` and the answer, and the live count falling by the size
+of the structure once the request is dropped. Without the registration the same test says
+`access to freed object`.
 
 ## Making the answer later (`answer_with`)
 

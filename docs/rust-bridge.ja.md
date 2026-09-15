@@ -83,7 +83,8 @@ vm.define_closure(sc, "ask", move |vm, _self, a, _blk| {
         Value::Int(i)   => Arg::Num(*i as f64),
         Value::Float(f) => Arg::Num(*f),
         Value::Sym(s)   => Arg::Text(vm.sym_name(*s).to_string()),
-        other           => /* 文字列なら Text */ …,
+        _ if is_string(vm, *v) => Arg::Text(/* バイト列を写す */ …),
+        other           => Arg::Value(RootedValue::new(vm, *other, &release)),  // Hash/Array は値のまま（gc_register）
     }).collect();
     let queue = vm.task_queue_new()?;          // mruby-task の Task::Queue
     vm.gc_register(queue);

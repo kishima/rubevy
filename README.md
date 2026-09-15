@@ -20,7 +20,9 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
   frame's scripts have run, the same promise `Commands` makes.
 * **A question the game answers when it can**: `Rubevy.ask("scan", 40)` parks the script's
   task on a queue, a system of the game takes the request and answers it on that frame or a
-  later one. Where the answer is work rather than a lookup, `ScriptWorld::answer_with` takes
+  later one. An argument may be a Hash or an Array as well as a number, a string or an entity
+  — the value itself reaches the host (`Arg::Value`), kept alive for as long as the request is
+  and let go of with it. Where the answer is work rather than a lookup, `ScriptWorld::answer_with` takes
   a `Future` instead: it goes to Bevy's task pool and the plugin answers the script on the
   frame it finishes. Bevy's pools are threads only with bevy's own `multi_threaded` feature —
   this crate does not ask for it, the app does (`docs/host-api.md`).
