@@ -17,15 +17,15 @@ ruby-source = ["dep:sabiruby-compiler"]
 # published 0.4.0 is behind). A clone of this repository still builds on its own — cargo fetches
 # it — and this goes back to a crates.io version once the API settles. To work against a checkout
 # of the VM next to this one, put the redirect in `.cargo/config.toml` (git-ignored):
-#   [patch."https://github.com/kishima/sabiruby"]
+#   [patch."https://github.com/sabiruby/sabiruby"]
 #   sabiruby = { path = "../sabiruby" }
-sabiruby = { git = "https://github.com/kishima/sabiruby" }
+sabiruby = { git = "https://github.com/sabiruby/sabiruby" }
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log"] }
 thiserror = "2"
 # only for the `ruby-source` feature
-sabiruby-compiler = { git = "https://github.com/kishima/sabiruby", features = ["host"], optional = true }
+sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"], optional = true }
 
 [dev-dependencies]
 bevy = { version = "0.19.1", default-features = false, features = ["bevy_asset", "bevy_log", "bevy_window", "bevy_winit", "x11"] }
 # the tests compile their Ruby in process
-sabiruby-compiler = { git = "https://github.com/kishima/sabiruby", features = ["host"] }
+sabiruby-compiler = { git = "https://github.com/sabiruby/sabiruby", features = ["host"] }

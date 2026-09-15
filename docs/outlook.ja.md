@@ -37,7 +37,7 @@ C のスタックに隠れた状態はありませんし、longjmp のような�
 
 Ruby の DSL をライブコーディングの楽器にした前例が Sonic Pi です。音でできたことは、映像と遊びでもできます。
 
-**いまできること**: SabiRuby Battle（`kishima/rubevy_games`）では、ロボットの頭脳（`.rb`）をゲームの中のエディタで書き換え、
+**いまできること**: SabiRuby Battle（`sabiruby/rubevy_games`）では、ロボットの頭脳（`.rb`）をゲームの中のエディタで書き換え、
 F5 でそのロボットだけに即反映できます。反映はメモリの上だけで、残したいときに保存します。外のエディタでファイルを保存すると、
 そのファイルを使うロボットが新しい頭脳で動き直します。ブラウザ版でも同じエディタが動き、保存先はブラウザの中です。
 土台として、ホストの差し込み口（`Host`）、`eval`、`require`／`load`、ゲーム内でのコンパイルが入っています。
@@ -77,7 +77,7 @@ Ruby で書いたゲームを、机の上でも、リンクを送った先でも
 Ruby のファンタジーコンソールです。
 
 **いまできること**: SabiRuby Battle は、同じコードから PC 版とブラウザ版をビルドし分け、ブラウザ版を
-https://kishima.github.io/rubevy_games/ で公開しています（差は `sabibots/src/platform.rs` に集め、ビルドの対象で切り替え）。
+https://sabiruby.github.io/rubevy_games/ で公開しています（差は `sabibots/src/platform.rs` に集め、ビルドの対象で切り替え）。
 ブラウザ版では、ゲームの中の VM（Rust）とは別に、Playground のコンパイラ（本家の C を wasm にしたもの）を読み込み、
 ロボットの `.rb` をその場でコンパイルしています。VM 自体は C を必要としないので、あらかじめコンパイルした `.mrb` だけで遊ぶなら
 モジュールは 1 つで済みます（`rubevy_games/docs/web.md`）。
@@ -133,7 +133,7 @@ Playground のために作るビジュアライザ（レジスタ、フレーム
 初心者が Ruby を書き、エンティティが動き、VM を開けば中でレジスタが動いているのが見える。
 日本では Ruby が教育で使われています。中が透けて見えるゲームエンジンは、道具というより教材になります。
 
-**いまできること**: SabiRuby Playground（https://kishima.github.io/sabiruby-playground/）で、コード → AST → バイトコード → 実行を並べて見られ、
+**いまできること**: SabiRuby Playground（https://sabiruby.github.io/sabiruby-playground/）で、コード → AST → バイトコード → 実行を並べて見られ、
 デバッグでは 1 命令ずつ進めて、名前付きのレジスタ、クロージャが残す環境、`raise` がたどる catch テーブル、Fiber、ヒープと GC を見られます。
 ゲームの側では、エディタがロボットの頭脳の「最近よく通っている行」を色で示し、スコアボードが 1 フレームに使った命令数を出します
 （VM の `task_frames` と `task_instructions`）。

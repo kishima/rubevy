@@ -37,7 +37,7 @@ in Japanese in [`docs/rust-bridge.ja.md`](docs/rust-bridge.ja.md).
 ## Try it
 
 The VM comes from crates.io (`sabiruby` 0.3), so a clone of this repository alone builds. To
-work against a checkout of `kishima/sabiruby` next to this one, redirect it in
+work against a checkout of `sabiruby/sabiruby` next to this one, redirect it in
 `.cargo/config.toml` (git-ignored) instead of editing `Cargo.toml`:
 
 ```toml

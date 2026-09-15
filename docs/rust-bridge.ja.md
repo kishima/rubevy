@@ -1,6 +1,6 @@
 # Rust と Ruby をどうつないでいるか
 
-2026-09-14。rubevy と SabiRuby Battle（`kishima/rubevy_games` の `sabibots`）で、Ruby のスクリプトと
+2026-09-14。rubevy と SabiRuby Battle（`sabiruby/rubevy_games` の `sabibots`）で、Ruby のスクリプトと
 Rust のゲームがどう接続されているかを、実際のコードに沿ってまとめたもの。後半で、同じことを
 C の mruby を組み込んで作った場合と比べ、VM を Rust で書いたことで何が良くなったのか、何を払っているのかを示す。
 

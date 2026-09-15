@@ -103,7 +103,7 @@ settles. To work against a checkout of the VM next to this one, redirect it in a
 `.cargo/config.toml` instead of editing `Cargo.toml`:
 
 ```toml
-[patch."https://github.com/kishima/sabiruby"]
+[patch."https://github.com/sabiruby/sabiruby"]
 sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```

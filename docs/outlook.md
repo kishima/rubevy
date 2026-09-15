@@ -12,7 +12,7 @@ Bevy's `Time`, a budget of instructions and time limits per frame, `Rubevy.ask` 
 ask the game something and wait, `ScriptStats` for what a script spends and where it stands,
 the task terminated when its `ScriptTask` is removed or the entity despawned, `puts` to the log
 and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
-(`kishima/rubevy_games`), which also runs in the browser: https://kishima.github.io/rubevy_games/
+(`sabiruby/rubevy_games`), which also runs in the browser: https://sabiruby.github.io/rubevy_games/
 
 ## Status at a glance (2026-09-14)
 
@@ -250,7 +250,7 @@ free, but none needs a new kind of VM.
    beginners write Ruby, see entities move, and can open the VM to see the registers and
    the frames. Ruby is a teaching language in Japan; a game engine with a transparent VM
    is a course, not just a tool.
-   *Now (done in the playground):* https://kishima.github.io/sabiruby-playground/ shows code,
+   *Now (done in the playground):* https://sabiruby.github.io/sabiruby-playground/ shows code,
    AST, bytecode and result side by side, and steps the VM showing named registers,
    environments, catch tables, fibers, heap and GC. In a game, the editor shading and the
    instruction count per frame come from `task_frames` and `task_instructions`. The
