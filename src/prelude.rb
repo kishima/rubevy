@@ -58,4 +58,62 @@ module Rubevy
   def self.find(name)
     ask("entities.with", name.to_s).pop
   end
+
+  # Raised in whatever is waiting on a subscription's queue when the subscription ends: the
+  # script's entity was despawned, its `ScriptTask` was taken away, or its own task ran off its
+  # end. Nothing will ever be published to that queue again, so a `pop` that answered would be
+  # answering for ever.
+  #
+  # It is raised rather than answered with nil so that a waiting task *unwinds*: an `ensure` in
+  # it runs, and the task ends instead of standing on a queue nobody can fill (a task the
+  # scheduler keeps, holding its context, for as long as the VM lives). A script that wants to
+  # end quietly rescues it.
+  class Unsubscribed < StandardError; end
+
+  # What `Rubevy.subscribe` extends the queue it answers with (one object, not the class: an
+  # `Rubevy.ask` queue is an ordinary `Task::Queue` and keeps the gem's own meaning).
+  #
+  # mruby-task's `Queue#close` wakes everything parked on the queue and makes `pop` answer nil
+  # from then on — the gem's way of saying "no more", and the reason rubevy closes a queue it
+  # lets go of. nil is a poor thing for a script to have to notice, though: `loop { q.pop }`
+  # against a closed queue never parks again, so the leaked task becomes a busy one. The
+  # subscription turns that nil into the exception above. Items already in the queue when it
+  # closed are popped first, so a script that was behind still sees what it missed.
+  module Subscription
+    def pop(*args)
+      value = super
+      raise Unsubscribed, "the subscription ended" if value.nil? && closed?
+      value
+    end
+
+    alias shift pop
+    alias deq pop
+  end
+end
+
+# A task a script makes with `Task.new` carries the entity of the task that made it.
+#
+# `Rubevy.entity`, `Rubevy.ask` and `Rubevy.subscribe` all read the entity off the task the
+# scheduler is running — the plugin hangs it on the script's own task as `@rubevy_entity`
+# (`ENTITY_IVAR` in src/lib.rs) — and a task made out of a block has none, so without this a
+# script's second task could not ask the game anything or subscribe to anything. SabiRuby's
+# `Task` does not record which task made it (`TaskData` in src/builtins/ext_task.rs has no
+# parent), and the one place that still knows is the call itself: inside `Task.new`,
+# `Task.current` is the task doing the making. So the entity is copied here rather than looked
+# up through a parent later; a task made by a task that inherited one inherits it in turn.
+#
+# A script may still set `@rubevy_entity` on a task itself — it is an ordinary instance
+# variable — which is what a task that should act for another entity does.
+class Task
+  class << self
+    alias __rubevy_plain_new new
+
+    def new(*args, **kw, &block)
+      task = __rubevy_plain_new(*args, **kw, &block)
+      parent = Task.current
+      entity = parent && parent.instance_variable_get(:@rubevy_entity)
+      task.instance_variable_set(:@rubevy_entity, entity) unless entity.nil?
+      task
+    end
+  end
 end

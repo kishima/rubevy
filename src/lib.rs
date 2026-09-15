@@ -773,21 +773,24 @@ impl ScriptWorld {
     pub const QUEUE_LIMIT: usize = 64;
 
     /// Drops the oldest messages until there is room for one more.
+    ///
+    /// This runs on every published message, so it asks the VM rather than the script's Ruby:
+    /// `Vm::task_queue_len` and `Vm::task_queue_try_pop` read the queue's own Array, where
+    /// `size` and `__pop_try(true)` each put a call on the stack to do the same thing.
     fn make_room(&mut self, queue: ObjId) {
-        let size = self.vm.intern("size");
-        // `Task::Queue` has no non-blocking pop on the Rust side, so the two are Ruby's own
-        // (`__pop_try(true)` answers the item where there is one, and there is one here)
-        let pop = self.vm.intern("__pop_try");
         loop {
-            let n = match self.vm.funcall(Value::Obj(queue), size, &[], Value::Nil) {
-                Ok(Value::Int(n)) => n as usize,
-                _ => return,
+            let n = match self.vm.task_queue_len(queue) {
+                Ok(n) => n,
+                Err(_) => return,
             };
             if n < Self::QUEUE_LIMIT {
                 return;
             }
-            if self.vm.funcall(Value::Obj(queue), pop, &[Value::True], Value::Nil).is_err() {
-                return;
+            // `None` is an empty queue, which cannot happen while `n >= QUEUE_LIMIT`; stopping
+            // on it is what keeps this loop finite whatever the queue turns out to be
+            match self.vm.task_queue_try_pop(queue) {
+                Ok(Some(_)) => {}
+                _ => return,
             }
         }
     }
@@ -808,6 +811,14 @@ impl ScriptWorld {
     /// Lets go of what an entity's script subscribed to. Called where a script's task ends and
     /// where its [`ScriptTask`] is removed: a queue nobody will ever read is a queue the game
     /// would keep filling.
+    ///
+    /// Each queue is **closed** before it is let go of, which is what ends the tasks waiting on
+    /// it. A script's own task is terminated with its [`ScriptTask`], but a task it made with
+    /// `Task.new` is not: parked on a `pop` for a message that will never come, it would stand
+    /// there — holding its context, its stack and everything the block closed over — for as
+    /// long as the VM lives, and its `ensure` would never run. Closing wakes it, and
+    /// `Rubevy::Subscription#pop` (`src/prelude.rb`) raises `Rubevy::Unsubscribed` in it, so it
+    /// unwinds through its `ensure` and ends.
     fn unsubscribe(&mut self, entity: Entity) {
         let Some(state) = self.vm.host_state_mut::<HostState>() else { return };
         let mut dropped = Vec::new();
@@ -819,7 +830,12 @@ impl ScriptWorld {
                 true
             }
         });
+        let close = self.vm.intern("close");
         for queue in dropped {
+            if let Err(e) = self.vm.funcall(Value::Obj(queue), close, &[], Value::Nil) {
+                let message = self.vm.describe_error(&e);
+                error!("rubevy: could not close a subscription: {message}");
+            }
             self.vm.gc_unregister(queue);
         }
     }
@@ -1502,7 +1518,7 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
     // `hits = Rubevy.subscribe(:hit)` — a `Task::Queue` the game pushes messages onto
     // (`ScriptWorld::publish`). It is the same kind of queue `Rubevy.ask` answers on, so a
     // script waits on it the same way, in this task or in one of its own.
-    vm.define_closure(sc, "subscribe", |vm, _s, a, _b| {
+    vm.define_closure(sc, "subscribe", move |vm, _s, a, _b| {
         let name = match a.first() {
             Some(Value::Sym(s)) => vm.sym_name(*s),
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
@@ -1510,19 +1526,28 @@ fn install_host_api(vm: &mut Vm, release: ReleaseQueue) -> ObjId {
         };
         // A subscription belongs to an entity's script: that is who a message addressed to an
         // entity reaches, and it is what says when to let the queue go. A task a script made
-        // with `Task.new` carries no entity, so it subscribes through the script that made it
-        // and shares the queue — which is the shape the waiting task wants anyway.
+        // with `Task.new` has the entity of the task that made it (`src/prelude.rb`), so it may
+        // subscribe for itself; what is left here is a task with no entity at all — one the
+        // host spawned outside a `Script`, or one whose `@rubevy_entity` was cleared.
         let entity = match current_entity(vm) {
             Value::Int(bits) => entity_from_bits(bits as u64),
             _ => None,
         };
         let Some(entity) = entity else {
-            return Err(vm.raise_arg(
-                "subscribe from the script's own task (a Task.new task has no entity)",
-            ));
+            return Err(vm.raise_arg("subscribe from a task that has an entity (@rubevy_entity)"));
         };
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);
+        // This queue ends: `ScriptWorld::unsubscribe` closes it, and a closed `Task::Queue`
+        // answers `pop` with nil for ever. `Rubevy::Subscription` (`src/prelude.rb`) is what
+        // turns that nil into `Rubevy::Unsubscribed`, so a task waiting here unwinds — runs its
+        // `ensure` and ends — rather than spinning on a queue nothing will fill again. It is
+        // extended into this one object, so an `Rubevy.ask` queue keeps the gem's own meaning.
+        let subscription = vm.intern("Subscription");
+        if let Some(module) = vm.const_get(m, subscription) {
+            let extend = vm.intern("extend");
+            vm.funcall(Value::Obj(queue), extend, &[module], Value::Nil)?;
+        }
         match vm.host_state_mut::<HostState>() {
             Some(state) => {
                 state.subscriptions.push(Subscription { entity: Some(entity), name, queue })
