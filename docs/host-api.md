@@ -86,6 +86,46 @@ actually run.
   and hp, say). The boundary is deliberately that small: it is enough for a game to ask anything
   and get a table back, without a serialisation format between the two.
 
+## Making the answer later (`answer_with`)
+
+Where the answer is work rather than a lookup — a path search, a file, a query, anything that
+does not fit in a frame — hand the request and a future to `ScriptWorld::answer_with` instead
+of answering on the spot:
+
+```rust
+fn answer_paths(mut world: ResMut<ScriptWorld>) {
+    for request in world.take_requests() {
+        let to = (request.num_or(0, 0.0), request.num_or(1, 0.0));
+        world.answer_with(request, async move { Answer::Rows(search(to).await) });
+    }
+}
+```
+
+The future goes to Bevy's `AsyncComputeTaskPool`, and a system of the plugin answers the request
+on the frame it finishes. The request is the one `take_requests` gave you, handed over as it is;
+it is answered once, there, so do not answer it again yourself. `ScriptWorld::answering()` says
+how many are still out.
+
+Nothing changes for the script: it is parked on its queue from the `Rubevy.ask` until the answer
+arrives, exactly as when a system keeps the request for three frames, and the other scripts keep
+running. `examples/async.rs` asks on frame 0 and is answered on frame 6, with the ticker beside
+it running on 3 and 5.
+
+The plugin picks the finished futures up at the head of the frame, before the scripts run, rather
+than at the end beside `drain_commands`: a future finishes whenever its thread is done, and most
+of a frame's wall clock is outside the schedule, so an answer that arrived in that gap wakes its
+script on this frame instead of the next one.
+
+**Threads are the app's choice, not this plugin's.** Bevy's task pools are threads only in a
+build with bevy's `multi_threaded` feature. Without it they are a single-threaded fallback on the
+main thread, where a future that only computes is driven to its end inside `answer_with` — the
+frame waits for it — while a future waiting on something else (a channel, an IO completion, a
+waker of your own) still parks and is picked up later. An app that wants the work off the main
+thread puts `multi_threaded` in the features of its own `bevy` dependency; this crate's
+`dev-dependencies` do that for the example and the tests. Either way the app needs Bevy's
+`TaskPoolPlugin`, which `MinimalPlugins` and `DefaultPlugins` both add — `answer_with` panics
+without it, because the pool it spawns on does not exist.
+
 ## What the script sees of the frame
 
 `$rubevy` is refreshed at the head of every frame: `:frame` (the count), `:delta` (seconds since
