@@ -275,6 +275,9 @@ impl ScriptWorld {
         if let Err(e) = enable_scheduler_gc(&mut vm) {
             return Err(format!("GC.scheduler_driven: {e}"));
         }
+        // the natives' side of the bridge lives in the VM, not in a static, so two `App`s in
+        // one process each have their own (`Vm::set_host_state`)
+        vm.set_host_state(HostState::default());
         install_host_api(&mut vm);
         // a clock for the time limits (`frame_time`, `overrun`). Timeslices stay counted in
         // instructions, so what a script does is the same on every machine; the clock only keeps a
@@ -368,20 +371,25 @@ fn enable_scheduler_gc(vm: &mut Vm) -> Result<(), String> {
         .map_err(|e| vm.describe_error(&e))
 }
 
-/// The queue a native writes and a system reads. It lives outside the VM
-/// because a native gets `&mut Vm` and nothing else.
-static COMMANDS: std::sync::Mutex<Vec<HostCommand>> = std::sync::Mutex::new(Vec::new());
+/// What this plugin keeps inside the VM (`Vm::set_host_state`), for the natives to reach
+/// through the `&mut Vm` they are given. One of these per VM, so two `App`s in one process
+/// have a queue each — which is why the tests may run in parallel.
+#[derive(Default)]
+struct HostState {
+    /// The queue a native writes and [`drain_commands`] reads.
+    commands: Vec<HostCommand>,
+}
 
-fn push_command(c: HostCommand) {
-    if let Ok(mut q) = COMMANDS.lock() {
-        q.push(c);
+fn push_command(vm: &mut Vm, c: HostCommand) {
+    if let Some(state) = vm.host_state_mut::<HostState>() {
+        state.commands.push(c);
     }
 }
 
-fn take_commands() -> Vec<HostCommand> {
-    match COMMANDS.lock() {
-        Ok(mut q) => std::mem::take(&mut *q),
-        Err(_) => Vec::new(),
+fn take_commands(vm: &mut Vm) -> Vec<HostCommand> {
+    match vm.host_state_mut::<HostState>() {
+        Some(state) => std::mem::take(&mut state.commands),
+        None => Vec::new(),
     }
 }
 
@@ -568,7 +576,7 @@ fn drain_commands(
     mut transforms: Query<&mut Transform>,
     mut world: ResMut<ScriptWorld>,
 ) {
-    for c in take_commands() {
+    for c in take_commands(&mut world.vm) {
         match c {
             HostCommand::Ask { entity, kind, args, queue } => {
                 // parked scripts wait here until a system of the game answers
@@ -604,39 +612,39 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 fn install_host_api(vm: &mut Vm) {
     let m = vm.define_module("Rubevy");
     let sc = vm.singleton_class(Value::Obj(m)).expect("Rubevy singleton");
-    vm.define_method(sc, "log", |vm, _s, a, _b| {
+    vm.define_closure(sc, "log", |vm, _s, a, _b| {
         let text = match a.first() {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => String::new(),
         };
-        push_command(HostCommand::Log(text));
+        push_command(vm, HostCommand::Log(text));
         Ok(Value::Nil)
     });
-    vm.define_method(sc, "spawn", |vm, _s, a, _b| {
+    vm.define_closure(sc, "spawn", |vm, _s, a, _b| {
         let name = match a.first() {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => String::new(),
         };
         let (x, y, z) = (num(vm, a.get(1)), num(vm, a.get(2)), num(vm, a.get(3)));
-        push_command(HostCommand::Spawn { name, x, y, z });
+        push_command(vm, HostCommand::Spawn { name, x, y, z });
         Ok(Value::Nil)
     });
-    vm.define_method(sc, "despawn", |vm, _s, a, _b| {
+    vm.define_closure(sc, "despawn", |vm, _s, a, _b| {
         let bits = a.first().map(|v| vm.expect_int(*v, "entity")).transpose()?.unwrap_or(0);
-        push_command(HostCommand::Despawn(bits as u64));
+        push_command(vm, HostCommand::Despawn(bits as u64));
         Ok(Value::Nil)
     });
-    vm.define_method(sc, "entity", |vm, _s, _a, _b| Ok(current_entity(vm)));
-    vm.define_method(sc, "move_to", |vm, _s, a, _b| {
+    vm.define_closure(sc, "entity", |vm, _s, _a, _b| Ok(current_entity(vm)));
+    vm.define_closure(sc, "move_to", |vm, _s, a, _b| {
         // the entity the script is attached to, which is the common case
         let Value::Int(bits) = current_entity(vm) else { return Ok(Value::Nil) };
         let (x, y, z) = (num(vm, a.first()), num(vm, a.get(1)), num(vm, a.get(2)));
-        push_command(HostCommand::SetPosition { entity: bits as u64, x, y, z });
+        push_command(vm, HostCommand::SetPosition { entity: bits as u64, x, y, z });
         Ok(Value::Nil)
     });
     // `Rubevy.ask("scan", 40)` — the game answers it, this frame or a later one, and the script
     // waits on the queue meanwhile (its task is parked, so it costs nothing)
-    vm.define_method(sc, "ask", |vm, _s, a, _b| {
+    vm.define_closure(sc, "ask", |vm, _s, a, _b| {
         let kind = match a.first() {
             Some(v) => String::from_utf8_lossy(&vm.as_string(*v)?).into_owned(),
             None => return Err(vm.raise_arg("ask needs what to ask for")),
@@ -656,13 +664,13 @@ fn install_host_api(vm: &mut Vm) {
         let queue = vm.task_queue_new()?;
         vm.gc_register(queue);
         let entity = match current_entity(vm) { Value::Int(bits) => bits as u64, _ => u64::MAX };
-        push_command(HostCommand::Ask { entity, kind, args, queue });
+        push_command(vm, HostCommand::Ask { entity, kind, args, queue });
         Ok(Value::Obj(queue))
     });
-    vm.define_method(sc, "set_position", |vm, _s, a, _b| {
+    vm.define_closure(sc, "set_position", |vm, _s, a, _b| {
         let bits = a.first().map(|v| vm.expect_int(*v, "entity")).transpose()?.unwrap_or(0) as u64;
         let (x, y, z) = (num(vm, a.get(1)), num(vm, a.get(2)), num(vm, a.get(3)));
-        push_command(HostCommand::SetPosition { entity: bits, x, y, z });
+        push_command(vm, HostCommand::SetPosition { entity: bits, x, y, z });
         Ok(Value::Nil)
     });
 }
@@ -692,9 +700,9 @@ pub fn entity_of(bits: u64) -> Option<Entity> {
     entity_from_bits(bits)
 }
 
-/// What a script spawned this frame, for tests: the queue is drained by
-/// [`drain_commands`], so this is only useful before that system runs.
+/// What a script asked for this frame and has not had carried out yet, for tests: the queue is
+/// drained by [`drain_commands`], so this is only useful before that system runs.
 #[doc(hidden)]
-pub fn pending_command_count() -> usize {
-    COMMANDS.lock().map(|q| q.len()).unwrap_or(0)
+pub fn pending_command_count(world: &ScriptWorld) -> usize {
+    world.vm.host_state::<HostState>().map(|s| s.commands.len()).unwrap_or(0)
 }
