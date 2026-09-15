@@ -13,9 +13,11 @@ Run mruby bytecode inside [Bevy](https://bevy.org/) (0.19), using the
   preempted at its timeslice, so a frame cannot be lost to a runaway script.
 * **Priorities**: `Script::with_priority` (0 first, 128 by default), mruby-task's.
 * **A host API**: `Rubevy.log`, `.spawn`, `.despawn`, `.set_position`, `.move_to`, and
-  `.entity` (the entity this script is attached to). A native cannot touch the Bevy
-  world, so these leave a command behind and a system carries it out after the frame's
-  scripts have run — the same promise `Commands` makes.
+  `.entity` (the entity this script is attached to, as a `Rubevy::Entity` object that
+  carries `Entity::to_bits` as a handle — `to_i` for the number, `==` by it). A native
+  cannot touch the Bevy world, so these leave a command behind — on a queue inside the
+  VM (`Vm::set_host_state`), one per `App` — and a system carries it out after the
+  frame's scripts have run, the same promise `Commands` makes.
 * The script reads `$rubevy` (`:frame`, `:delta`, `:time`); `puts`/`p` go to Bevy's log;
   a `ScriptEnded` message carries what the task answered, or the exception it did not
   handle (mruby-task makes that the task's result, so one broken script does not stop
@@ -36,12 +38,12 @@ in Japanese in [`docs/rust-bridge.ja.md`](docs/rust-bridge.ja.md).
 
 ## Try it
 
-The VM comes from crates.io (`sabiruby` 0.3), so a clone of this repository alone builds. To
+The VM comes from git (`sabiruby`, main), so a clone of this repository alone builds. To
 work against a checkout of `sabiruby/sabiruby` next to this one, redirect it in
 `.cargo/config.toml` (git-ignored) instead of editing `Cargo.toml`:
 
 ```toml
-[patch.crates-io]
+[patch."https://github.com/sabiruby/sabiruby"]
 sabiruby = { path = "../sabiruby" }
 sabiruby-compiler = { path = "../sabiruby/compiler" }
 ```

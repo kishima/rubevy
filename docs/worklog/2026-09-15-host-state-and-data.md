@@ -184,3 +184,56 @@ VM 側に無い**ためで、rubevy 側で直せるものではない（sabiruby
 * `vm.task.running`（`current_entity`）— いま走っているタスク。`task_*` の公開関数は 20 本あるが、
   「走っているのはどれか」を答えるものが無い。
 * `vm.globals`（`set_frame_state`）— `$rubevy` を毎フレーム置く。グローバル変数の公開入口も無い。
+* `vm.heap.get(o).kind`（`is_exception`）— 終わったタスクの結果が例外かどうかを見る。`class_of` はあるが
+  「Exception の子孫か」を答える公開関数は無く、`funcall` で `is_a?` を呼ぶと Ruby のメソッド呼び出しになる
+  （タスクが終わったフレームだけとはいえ、判定のために VM を動かすことになる）ので、そのままにした。
+
+この 4 つは「`Vm` の公開フィールド」なので `unsafe` でも回避策でもないが、VM の内部構造に対する依存ではある。
+`grep -rn unsafe src/ tests/ examples/` は 0 件のまま。
+
+## 3. ドキュメント
+
+`docs/host-api.md` は、表の `Rubevy.entity` の行（「`Entity::to_bits`」→「`Rubevy::Entity`」）と、
+`Answer` の種類、`Request` の読み取り（`entity_arg` を足した）を直し、「エンティティが Ruby からどう見えるか」の
+節を新しく足した。`to_i` の値と `inspect` の文字列は実際に動かして確かめた（Bevy 0.19 の `Entity` の `Display` は
+`1v0`、その `to_bits` は `4294967294`。索引が反転して入るので、最初のエンティティが `4294967296` だろうという
+予想は外れた）。
+
+`docs/rust-bridge.ja.md` は 6 章の 3 項目（関数ポインタと `static`、答えの型、内部フィールド）と、
+2 章の表、3.1、3.2 のコード片を直した。6 章の「直した」項目は消さずに取り消し線で残してある
+（この文書は「どこが滑らかでないか」を時系列で追う性格なので、何がいつ直ったかが読めるほうがよい）。
+`Answer::List` / `Rows` の中のエンティティは今も `f64` 経由であることを明記した。ここが残った制限で、
+消すには表の型（`Vec<Vec<f64>>`）を変えることになり、ゲーム側の `radar` の作りに直接響く。
+
+README は host API の行（エンティティがオブジェクトであること、キューが VM の中にあること）に加えて、
+「Try it」の VM の入手元を直した（`crates.io` の 0.3 と書いてあったが、`Cargo.toml` は git を指しており、
+今回使う `define_closure` などは 0.4.0 にも入っていない。`[patch.crates-io]` の例も git の URL 向けに直した）。
+これは指示の範囲外の直しなので、不要ならこのコミットから落とせる形（README だけ）にしてある。
+
+**直していないもの**: `docs/outlook.md:72,142` と `docs/outlook.ja.md:191,289` に「ネイティブは関数ポインタ」
+「ホスト状態は `static` 経由」という記述が残っている。`outlook` は本体が保守している計画文書なので触っていない。
+
+## 4. 確認
+
+```
+cargo test --workspace   → 6 passed（entity.rs 3、replace.rs 3）、0 failed
+cargo build --examples   → headless / sensor とも通る
+cargo doc --no-deps      → 警告 0
+cargo clippy --all-targets → 2 件。いずれも今回触っていない箇所（drain_commands の
+                             collapsible_if と examples/headless.rs の type_complexity）で、
+                             作業前と同じ。途中で 1 件増やしたが（`ask` の中の入れ子の if）、
+                             `match` に直して戻した。
+```
+
+例（`cargo run --example headless` / `sensor`）も最後まで動かした。`sensor` は `Rubevy.ask` の往復と
+`Arg` の見え方（`scan asked for [Num(40.0)]`）が変わっていないことの確認になる。`headless` では
+`assets/scripts/hello.rb` の `"#{Rubevy.entity}"` の出力が数値から `#<Rubevy::Entity 33v0>` に変わった。
+スクリプトから見える**唯一の後方非互換**がこれで、エンティティ番号を文字列に埋めていたスクリプトは
+`Rubevy.entity.to_i` と書き直すことになる（リポジトリ内では `hello.rb` の 1 行だけ。
+rubevy_games のロボットは `Rubevy.entity` を使っていないことを確かめた）。
+
+ベンチは回していない（別の担当が同じ機械で sabiruby を計測中）。ゲーム（rubevy_games）は触っていない。
+API の互換は目視で確かめた: `Answer::{Nil,Bool,Num,Text,List,Rows}`、`Request::{num,text,num_or,entity}`、
+`ScriptWorld::{take_requests,answer,stats}`、`Script`、`ScriptTask`、`ScriptDone`、`ScriptEnded` は
+いずれも形が変わっていない。変わったのは `pending_command_count()` が `&ScriptWorld` を取るようになったことだけで、
+これは `#[doc(hidden)]` でリポジトリ内にも rubevy_games にも呼び出しが無い。

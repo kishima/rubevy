@@ -42,7 +42,7 @@ act throttle: 1.0, aim: a, fire: 0.3
 | 接点 | Rust 側 | Ruby 側 |
 |---|---|---|
 | 起動 | `Script` コンポーネント → `start_scripts` が `task_spawn`、タスクにエンティティ番号を持たせる | ファイルのトップレベルがタスクとして動く |
-| 質問 | `define_method` で登録したネイティブ `Rubevy.ask` | `Rubevy.ask("radar", 60.0).pop` |
+| 質問 | `define_closure` で登録したネイティブ `Rubevy.ask` | `Rubevy.ask("radar", 60.0).pop` |
 | 回答 | `ScriptWorld::take_requests` / `answer`（`Answer` enum） | `pop` の戻り値（Float、配列、配列の配列…） |
 | 時間 | `tick_scripts` が Bevy の `Time` でスケジューラの時計を進め、命令数の予算で回す | `sleep 0.05` が実時間で起きる |
 | 観察 | `ScriptWorld::stats` → `task_instructions` / `task_frames` | （何もしなくてよい） |
@@ -65,7 +65,9 @@ commands.entity(entity).insert(ScriptTask { task });   // ObjId（u32）を普�
 
 - タスク（Ruby の `Task` オブジェクト）の ID は `ObjId(u32)` という Copy な値で、コンポーネントにそのまま入る。
 - エンティティ番号はタスクのインスタンス変数に置く。ネイティブは「いま走っているタスク」からそれを読むので、
-  Ruby のコードは自分がどのエンティティかを意識しない。
+  Ruby のコードは自分がどのエンティティかを意識しない。Ruby に渡すときは `Rubevy::Entity` という
+  Data オブジェクト（`Vm::data_new`、ハンドルが `to_bits`）に包む。`Rubevy.entity` が返すのがそれで、
+  `to_i` で番号、`==` はハンドル比較、`dup` は `TypeError`。
 - SabiRuby Battle は `.rb` をゲームの中でコンパイルする（PC 版は同じプロセスの `sabiruby-compiler`、ブラウザ版は JS 経由）。
   ロボットのファイルの前に DSL（`prelude.rb`）をつなげて 1 本のプログラムにしている。
 
@@ -74,9 +76,10 @@ commands.entity(entity).insert(ScriptTask { task });   // ObjId（u32）を普�
 `Rubevy.ask` の実体（`install_host_api`）:
 
 ```rust
-vm.define_method(sc, "ask", |vm, _self, a, _blk| {
+vm.define_closure(sc, "ask", move |vm, _self, a, _blk| {
     let kind = String::from_utf8_lossy(&vm.as_string(a[0])?).into_owned();  // 型が違えば TypeError が `?` で Ruby に戻る
     let args: Vec<Arg> = a[1..].iter().map(|v| match v {
+        _ if is_entity(vm, *v) => Arg::Entity(/* Data のハンドル = to_bits */ …),
         Value::Int(i)   => Arg::Num(*i as f64),
         Value::Float(f) => Arg::Num(*f),
         Value::Sym(s)   => Arg::Text(vm.sym_name(*s).to_string()),
@@ -85,12 +88,14 @@ vm.define_method(sc, "ask", |vm, _self, a, _blk| {
     let queue = vm.task_queue_new()?;          // mruby-task の Task::Queue
     vm.gc_register(queue);
     let entity = current_entity(vm);           // vm.task.running の @rubevy_entity
-    push_command(HostCommand::Ask { entity, kind, args, queue });
+    push_command(vm, HostCommand::Ask { entity, kind, args, queue });  // キューは VM の host_state の中
     Ok(Value::Obj(queue))
 });
 ```
 
 - ネイティブの型は `fn(&mut Vm, Value, &[Value], Value) -> VmResult<Value>`。引数は `&[Value]`、戻り値は `Result`。
+  `define_closure` はこれをクロージャとして取る（`Arc<dyn Fn …>`）ので、ホストの値を捕まえられる。
+  ここでは `Rubevy::Entity` クラスの `ObjId` を捕まえている。
 - `Value` は `enum { Nil, False, True, Int(i64), Float(f64), Sym(Sym), Obj(ObjId) }` なので、引数の解釈は `match` で書ける。
   取りこぼしはコンパイラが指摘する。
 - 例外は `Err(VmError::Raise(..))` という値で、`?` で Ruby に戻る。Rust の関数の途中を飛び越えないので、
@@ -309,20 +314,32 @@ SabiRuby で同じ種類の間違いをすると、多くはコンパイルが�
 
 ## 6. まだ滑らかでないところ
 
-- **ネイティブはクロージャではなく関数ポインタ。** `NativeFn` は `fn` 型で、環境をキャプチャできない。
-  そのため rubevy は、ネイティブからゲームへの通り道に `static` の `Mutex<Vec<HostCommand>>` を使っている。
-  副作用として、同じプロセスで `App` を 2 つ並行に動かすと質問を取り合う（テストを 1 本にまとめた理由）。
-  C の mruby も同じ制約（`mrb->ud` の `void*`）なので比較上の不利ではないが、Rust ならもっと良くできる。
-  `Vm` に型付きのホスト状態を持たせる（`Box<dyn Any + Send + Sync>` を取り出す API）のが次の手。
+- ~~**ネイティブはクロージャではなく関数ポインタ。**~~ **直した**（2026-09-15）。VM 側に `define_closure`
+  （`Arc<dyn Fn … + Send + Sync>` を取るネイティブ）と `set_host_state` / `host_state_mut::<T>()`
+  （`Box<dyn Any + Send + Sync>` を型付きで出し入れする）が入ったので、`static` の `Mutex<Vec<HostCommand>>` は
+  `Vm` の中の `HostState` になった。`Rubevy` のメソッドは `define_closure` で登録し、
+  `Rubevy::Entity` クラスの `ObjId` をクロージャに捕まえている。
+  同じプロセスで `App` を 2 つ動かしても取り合わないので、`tests/replace.rs` は 3 本の `#[test]` に戻した。
+  古い実装に新しいテストを当てると「質問の数が合わない」どころか
+  `access to freed object ObjId(667)` で落ちる: `Request` が持つキューの `ObjId` は VM ごとのヒープの添字で、
+  VM をまたぐと別のものを指す。static を使うということは、その約束を型で守れないということでもあった。
 - **VM の内部に直接触っている。** `vm.heap.ivar_set`、`vm.task.running`、`vm.globals` は公開フィールドで、
-  rubevy はそれを使っている。Rust だから型は守られるが、VM の中身を変えると rubevy も変わる。安定した API に寄せたい。
-- **答えの型が狭い。** `Answer` は数値・文字列・数値の配列・その表だけ。エンティティ番号も `f64` で渡している
-  （`Entity::to_bits` は 64 ビットで、f64 で正確なのは 2^53 まで。世代が 2^21 を超えると壊れる。実用上は起きにくいが、型としては正しくない）。
-  `Rubevy.entity` は `Int` なので正確。
+  rubevy はそれを使っている（タスクにエンティティ番号を持たせる、走っているタスクを知る、`$rubevy` を毎フレーム置く）。
+  Rust だから型は守られるが、VM の中身を変えると rubevy も変わる。3 つとも VM 側に相当する公開関数がまだ無く、
+  ホスト API 化は sabiruby 側の仕事として残っている（2026-09-15 の見直しで、`static` のキューだけが公開 API に移った）。
+- **答えの型が狭い。** `Answer` は数値・文字列・数値の配列・その表、そしてエンティティ。
+  ~~エンティティ番号も `f64` で渡している~~ **エンティティは直した**（2026-09-15）。`Rubevy::Entity` という
+  Data オブジェクト（`Vm::data_new`。ハンドルが `Entity::to_bits`、VM はその中身を読まない）にし、
+  `Answer::Entity` と `Arg::Entity` を足した。`to_i` で番号、`==` はハンドル比較、`dup`/`clone` は `TypeError`。
+  `Answer::List` / `Rows` は数値の表のままにしてある（SabiRuby Battle の `radar` が 1 台 1 行の数値の表を返しており、
+  表の 1 セルだけオブジェクトにする形は型に入らない）ので、**表に載るエンティティは今も `f64` 経由**で、
+  そこは 2^53 の制限が残っている。`Rubevy.despawn` / `set_position` はどちらの形も受ける。
+  数値・文字列・エンティティ以外（構造体、コンポーネント）を渡す形は、`Data` の仕組みが使えるようになったので
+  次はホスト側が種類を足すだけになった。
 - **1 回の質問に 1 フレーム前後かかる。** 質問はシステムの順で処理されるため。`radar` が自分の状態も返し、
   `act` が操作をまとめて送るのはこの遅れを減らすため。
-- **ECS の橋はまだ。** エンティティを Ruby のオブジェクトとして包み、Bevy のリフレクションでコンポーネントに名前で触る形は
-  `outlook.ja.md` の計画のまま。今の「質問して答える」形は、その橋ができても、ゲームの規則を Rust に閉じ込めたい場面では残る。
+- **ECS の橋はまだ。** エンティティを Ruby のオブジェクトとして包むところまでは済んだ（上の `Rubevy::Entity`）。
+  残りの「Bevy のリフレクションでコンポーネントに名前で触る」形は `outlook.ja.md` の計画のまま。今の「質問して答える」形は、その橋ができても、ゲームの規則を Rust に閉じ込めたい場面では残る。
 
 ## 補足: `unsafe` の数について
 
