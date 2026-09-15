@@ -302,8 +302,8 @@ SabiRuby で同じ種類の間違いをすると、多くはコンパイルが�
 
 良い点だけを書くと比較にならないので、払っているものも書く。
 
-- **速度。** 本家 mruby 4.1.0-rc との比較（`sabiruby/docs/bench.md`、2026-09-12）で、fib が 3.5 倍、mandelbrot が 1.9 倍、
-  `vm_optimization_bench` が 6.8 倍、`so_lists` が 15.8 倍遅い。
+- **速度。** 本家 mruby 4.1.0-rc との比較（`sabiruby/docs/verification/bench.md`）で、2026-09-15 の高速化の後で全体 3.0 倍、fib 3.1 倍、
+  `so_lists` 4.4 倍、Hash 7.7 倍遅い（経緯は `sabiruby/docs/design/optimizations.md`）。
   rubevy は Ruby を「毎フレーム大量に計算する言語」ではなく「判断を書く DSL」として使う方針なので、効きにくい弱点だが、弱点ではある。
   SabiRuby Battle のロボットは 1 フレームに数百命令しか使っていない。
 - **互換性。** 本家のテストスイートは 2507 件中 2344 件が通る（残りは理由付き）。本家の C で書かれた gem（mruby-io、mruby-socket など）は使えない。

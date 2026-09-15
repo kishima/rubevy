@@ -2255,7 +2255,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "sabiruby"
 version = "0.4.0"
-source = "git+https://github.com/sabiruby/sabiruby#dc0c0d0ffeb94321ef05f83d2ec23de890a973e6"
+source = "git+https://github.com/sabiruby/sabiruby#b3cd818156e186c05433bd774b76e19b88333390"
 dependencies = [
  "hashbrown 0.15.5",
  "libm",
@@ -2265,7 +2265,7 @@ dependencies = [
 [[package]]
 name = "sabiruby-compiler"
 version = "0.2.1"
-source = "git+https://github.com/sabiruby/sabiruby#dc0c0d0ffeb94321ef05f83d2ec23de890a973e6"
+source = "git+https://github.com/sabiruby/sabiruby#b3cd818156e186c05433bd774b76e19b88333390"
 dependencies = [
  "cc",
  "sabiruby",
