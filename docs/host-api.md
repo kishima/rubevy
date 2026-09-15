@@ -14,9 +14,31 @@ command behind and the `drain_commands` system carries it out later in the same 
 | `Rubevy.log "text"` | `info!` through Bevy's log |
 | `Rubevy.spawn "name", x, y, z` | an entity with `SpawnedByScript { name }` and a `Transform` |
 | `Rubevy.despawn entity` | that entity is despawned |
-| `Rubevy.entity` | the entity this script is attached to (`Entity::to_bits`), or nil |
+| `Rubevy.entity` | the entity this script is attached to, as a `Rubevy::Entity`, or nil |
 | `Rubevy.move_to x, y, z` | the script's own entity is moved |
 | `Rubevy.set_position entity, x, y, z` | any entity is moved |
+
+## What an entity is, on the Ruby side
+
+`Rubevy.entity` — and any [`Answer::Entity`] the game sends back — is a `Rubevy::Entity`: an
+object whose *handle* is `Entity::to_bits`, which the VM carries and never reads through
+(SabiRuby's `Vm::data_new`). What a script can do with one:
+
+```ruby
+e = Rubevy.entity
+e.to_i                     # 4294967294 — Entity::to_bits, exactly
+e == Rubevy.entity         # true: two objects for one entity are equal, and are one Hash key
+e.inspect                  # "#<Rubevy::Entity 1v0>" (Bevy's own name for it)
+Rubevy.despawn e           # and it can be handed back
+Rubevy.ask("look_at", e)   # → Arg::Entity in the Request, read with `entity_arg(0)`
+```
+
+It is not an Integer, which is the point: `Rubevy.despawn 3` used to name somebody, and an
+entity that had been past an `f64` (`Answer::Num`) lost its low bits once a generation went
+past 2^21. `dup` and `clone` raise, so a handle is not copied behind the host's back.
+`Rubevy.despawn` and `Rubevy.set_position` still take the Integer form as well, which is what a
+script gets from an `Answer::Num`, `List` or `Rows` — a table of entities is still a table of
+numbers, and `entity_of(bits)` is the way back on the Rust side.
 
 ## From the script to the game and back (`Rubevy.ask`)
 
@@ -34,7 +56,7 @@ The game answers in a system of its own:
 ```rust
 fn answer_requests(mut world: ResMut<ScriptWorld>, /* whatever the answer needs */) {
     for request in world.take_requests() {          // Request { entity, kind, args, queue }
-        let answer = Answer::List(vec![3.0, 3.5]);  // Nil / Bool / Num / Text / List
+        let answer = Answer::List(vec![3.0, 3.5]);  // Nil / Bool / Num / Text / List / Rows / Entity
         world.answer(&request, answer);             // this frame, or keep it for a later one
     }
 }
@@ -57,11 +79,12 @@ actually run.
 * A request you cannot answer yet is yours to keep; nothing expires. If the script should not wait
   forever, it can say so on the Ruby side: `Rubevy.ask(…).pop(timeout_ms: 500)` answers nil when
   the deadline passes.
-* `kind` is a string; the arguments after it are numbers or strings ([`Arg`]), and
-  `Request::num(i)` / `Request::text(i)` read them. An answer is nil, a bool, a number, a string,
-  a list of numbers, or a table of them ([`Answer::Rows`] — every robot with its team and hp, say).
-  The boundary is deliberately that small: it is enough for a game to ask anything and get a
-  table back, without a serialisation format between the two.
+* `kind` is a string; the arguments after it are numbers, strings or entities ([`Arg`]), and
+  `Request::num(i)` / `Request::text(i)` / `Request::entity_arg(i)` read them — each answers
+  `None` for an argument of another sort. An answer is nil, a bool, a number, a string, an
+  entity, a list of numbers, or a table of them ([`Answer::Rows`] — every robot with its team
+  and hp, say). The boundary is deliberately that small: it is enough for a game to ask anything
+  and get a table back, without a serialisation format between the two.
 
 ## What the script sees of the frame
 
@@ -97,7 +120,8 @@ frame (without `overrun`, that test never finishes). The VM side is written up i
 ## Building against the VM
 
 `Cargo.toml` names the VM from git while the entry points this plugin needs are still being added
-(`Vm::task_instructions` and `task_location` are newer than the published 0.4.0). A clone still
+(`Vm::task_instructions` and `task_location`, and since 2026-09-15 `define_closure`,
+`set_host_state`, `define_fn` and `data_new`, are newer than the published 0.4.0). A clone still
 builds on its own — cargo fetches it — and it goes back to a crates.io version once the API
 settles. To work against a checkout of the VM next to this one, redirect it in a git-ignored
 `.cargo/config.toml` instead of editing `Cargo.toml`:

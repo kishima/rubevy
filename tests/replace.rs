@@ -49,15 +49,10 @@ fn frames(app: &mut App, n: usize) {
     }
 }
 
-// One test, not three: the queue between natives and systems is a static, so two apps running in
-// parallel test threads would take each other's requests.
+// Three tests, each with an `App` of its own: the queue between the natives and the systems is
+// the VM's host state (`Vm::set_host_state`), not a static, so apps running in parallel test
+// threads do not take each other's requests.
 #[test]
-fn a_script_whose_task_is_removed_stops() {
-    a_replaced_script_stops();
-    a_despawned_script_stops();
-    a_script_stuck_under_a_native_does_not_hold_the_frame();
-}
-
 fn a_replaced_script_stops() {
     let mut app = app();
     let (old, new) = {
@@ -85,6 +80,7 @@ fn a_replaced_script_stops() {
     assert!(seen.new > 0, "the new script runs");
 }
 
+#[test]
 fn a_despawned_script_stops() {
     let mut app = app();
     let old = app.world_mut().resource_mut::<Assets<MrbAsset>>().add(compile("loop { Rubevy.ask('old').pop }"));
@@ -98,6 +94,7 @@ fn a_despawned_script_stops() {
     assert_eq!(app.world().resource::<Seen>().old, before, "the despawned script keeps asking");
 }
 
+#[test]
 fn a_script_stuck_under_a_native_does_not_hold_the_frame() {
     // `Array.new(1) { loop { } }` cannot be switched out: the block runs under a native. With
     // the plugin's limits the frame comes back, the script ends with Task::Overrun, and the
