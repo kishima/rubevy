@@ -81,3 +81,106 @@ test a_despawned_script_stops ... ok
 test a_replaced_script_stops ... ok
 test result: ok. 3 passed
 ```
+
+## 2. エンティティを `Data` で渡す
+
+### 2.1 何が壊れていたか
+
+エンティティは 2 つの経路で Ruby に渡っていた。`Rubevy.entity` は `Value::Int`（`Entity::to_bits` は 64 ビット、
+`Int` は `i64` なので正確）、ゲームの答えに載せる場合は `Answer::Num` / `List` / `Rows` の `f64`。
+後者が問題で、`f64` が正確なのは 2^53 まで。Bevy の `Entity::to_bits` は世代を上位 32 ビットに置くので、
+世代が 2^21 を超えると下位が落ちる。実用上まず起きないが、「型としては正しくない」（6 章）。
+
+正確さとは別に、Integer で渡すことには「型が無い」問題もある。`Rubevy.despawn 3` と書けてしまい、
+3 は誰かのエンティティになる。数値の演算もできる（`entity + 1`）。
+
+### 2.2 クラスをどう作るか — `define_class_under` が無い
+
+Data オブジェクトには入れ物のクラスが要る。`Rubevy::Entity` にしたいが、VM の `define_class(name, super)` は
+**Object の下にしか置けない**（`src/vm.rs:1058`。定数を `self.core.object` の `consts` に入れる）。
+`define_class_under` に当たるものは無い。3 案を比べた:
+
+1. `vm.define_class("Entity", object)` でトップレベルの `Entity` にする。ゲーム側が `Entity` という名前を
+   使いたい場合に衝突するし、`Rubevy` にぶら下がっていないので由来が読めない。
+2. `vm.heap.class_mut(m).consts.insert(..)` で自分でぶら下げる。まさに今回減らしたい「VM の内部に直接触る」形。
+3. Ruby がやるとおりにする: `Class.new(Object)` を `funcall` で作り、`Rubevy.const_set(:Entity, it)` で名前を付ける。
+
+3 を採った。`const_set` の実装（sabiruby `src/builtins/object.rs:136`）は、渡されたクラスが無名なら
+`name` と `outer` を埋めるので、これだけで `Rubevy::Entity` という完全な名前になる（`e.class.to_s` が
+`"Rubevy::Entity"` を返すことをテストで確かめた）。公開 API だけで済み、VM 側に新しい入口を足す必要もない。
+
+### 2.3 Ruby から見える形
+
+Data オブジェクトは VM 側で既に `==` / `eql?` / `hash` が `(tag, handle)` 一致、`equal?` は同一性、
+`dup` / `clone` は `TypeError`、`inspect` は `#<Rubevy::Entity:0x…>` になる（sabiruby `tests/data.rs`）。
+ホストが足したのは `to_i`（ハンドル = bits）と `inspect` / `to_s` の 3 本だけで、いずれも `define_fn` と
+`This<DataRef>` で 1 行:
+
+```rust
+vm.define_fn(entity, "to_i", |this: This<DataRef>| this.handle as i64);
+```
+
+`inspect` は既定のままでも「使える」が、`p Rubevy.entity` が `#<Rubevy::Entity:0x000000000040>` としか
+言わないのはデバッグに役立たないので、Bevy の `Entity` の `Display` を借りて `#<Rubevy::Entity 3v1#…>` の形にした。
+`to_s` も同じにしてある（`"#{e}"` が `#<Rubevy::Entity>` になるのを避けるため）。
+
+### 2.4 タスクのインスタンス変数は Int のまま — オブジェクトは呼ぶたびに作る
+
+`Rubevy.entity` が返すオブジェクトを、タスクの `@rubevy_entity` に持たせて使い回す案と、呼ばれるたびに
+新しく作る案があった。後者にした理由は 3 つ:
+
+* `move_to` と `ask` は「いま走っているタスクのエンティティ」を **`u64` として**使う。ivar が Int のままなら
+  そのまま読めるが、Data を入れると毎回 `data_of` で開けることになる。
+* 同じエンティティの 2 つのオブジェクトは `==` でも `hash` でも等しい（VM 側がハンドルで比べるため）ので、
+  スクリプトからは区別が付かない。区別が付くのは `equal?` だけで、これを使うスクリプトは想定していない。
+* 捨てられたオブジェクトができるので、**解放フックが呼ばれることをテストで観察できる**（2.6）。
+
+代償は呼び出しごとに 1 オブジェクトの割り当て。ループの中で `Rubevy.entity` を何度も呼ぶスクリプトは
+ごみを作るが、GC はスケジューラの idle 点で回る設定なので、フレームの途中で止まることはない。
+気になるスクリプトは `e = Rubevy.entity` と一度受ければよい。
+
+### 2.5 `Answer` と `Arg` — ゲームを壊さない範囲
+
+`Answer::Entity(Entity)` と `Arg::Entity(Entity)` を**足した**。`List` と `Rows` は数値のまま残してある。
+理由は互換性で、SabiRuby Battle は `Answer::Num(e.to_bits() as f64)`（`rubevy_games/sabibots/src/main.rs:1239`）で
+エンティティを返し、`radar` は 1 台 1 行の数値の表を返す。表の中の 1 セルだけオブジェクトにする形は
+`Rows(Vec<Vec<f64>>)` の型に入らないし、表は数値の表であることに意味がある。
+`Request::num` / `text` の振る舞いも変えていない: エンティティの引数に対しては `num` も `text` も `None` を返す
+（`as_num` / `as_text` の `match` に variant を足しただけ）。読むための入口は `Arg::as_entity` と
+`Request::entity_arg(i)` を新設した。
+
+`Rubevy.despawn` と `Rubevy.set_position` は `entity_arg()` という小さな関数で「Data なら handle、
+そうでなければ `expect_int`」を見る。Integer を受ける経路を残したのは、既存のスクリプトと、
+ゲームが `Answer::Num` で返したエンティティ（上の互換）を受け取ったスクリプトのため。
+
+### 2.6 解放フック — 何も持たないものに登録する意味
+
+エンティティの Data はホスト側の資源を持たない。ハンドルが `Entity::to_bits` そのもので、
+そのエンティティが生きているかを知っているのは ECS だからだ。だからフックの中ですることは無い。
+それでも `set_on_free` を登録したのは、(1) ハンドルを slab に持つ種類の Data を後で足すときの置き場所を
+決めておくため、(2) 経路が本当に動くことを一度確かめるため。
+
+フックは `&mut Vm` をもらえない（GC の終わりに走るため）ので、観察できるのは外に持ち出した値だけになる。
+`Arc<AtomicU64>` を 1 つ捕まえて数えるだけにし、`ScriptWorld::freed_entities()` で読めるようにした
+（`Vm` が `Send + Sync` であることを壊さない形でもある）。テストは 300 個作って `GC.start` し、
+250 個以上が回収されたことを見る。
+
+```
+running 3 tests
+test a_script_holds_its_entity_as_an_object ... ok
+test an_entity_the_game_answered_with_comes_back_the_same ... ok
+test the_host_is_told_when_an_entity_object_is_collected ... ok
+```
+
+### 2.7 VM の内部フィールドに直接触っている残り
+
+減らせたのは `install_host_api` の周りだけで、次の 3 つは残した。いずれも**公開 API に相当するものが
+VM 側に無い**ためで、rubevy 側で直せるものではない（sabiruby に入口を足す仕事になる）。
+
+* `vm.heap.ivar_set` / `ivar_get`（`start_scripts` と `current_entity`）— タスクにエンティティ番号を持たせる。
+  `Vm` にインスタンス変数の入口は無い（`object.rs` の `Heap` のメソッドとしてのみ公開）。
+  `funcall` で `instance_variable_set` を呼ぶ案は、毎フレームではないとはいえ、
+  Ruby のメソッド呼び出し 1 回を挟むのと、`@rubevy_entity` という名前を Ruby から書き換えられる点で同じなので採らなかった。
+* `vm.task.running`（`current_entity`）— いま走っているタスク。`task_*` の公開関数は 20 本あるが、
+  「走っているのはどれか」を答えるものが無い。
+* `vm.globals`（`set_frame_state`）— `$rubevy` を毎フレーム置く。グローバル変数の公開入口も無い。

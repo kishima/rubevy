@@ -9,8 +9,10 @@
 //! What a script sees of the host:
 //! * `$rubevy` — a Hash refreshed at the head of every frame (`:frame`,
 //!   `:delta`, `:time`).
-//! * `Rubevy.entity` — the entity this script is attached to, as an Integer
-//!   (`Entity::to_bits`), read off the task the scheduler is running.
+//! * `Rubevy.entity` — the entity this script is attached to, read off the task
+//!   the scheduler is running. It is a `Rubevy::Entity` object, which carries
+//!   `Entity::to_bits` as a handle the VM never reads through (`Vm::data_new`);
+//!   `to_i` gives the number, `==` compares by it.
 //! * `Rubevy.log`, `Rubevy.spawn`, `Rubevy.despawn`, `Rubevy.set_position`,
 //!   `Rubevy.move_to` — these do not touch the Bevy world from inside the VM
 //!   (a native cannot); they put a command on a queue that a system drains
@@ -31,6 +33,7 @@ use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
+use sabiruby::convert::{DataRef, This};
 use sabiruby::value::{ObjId, Slot};
 use sabiruby::{Value, Vm, VmError};
 
@@ -178,19 +181,30 @@ enum HostCommand {
 pub enum Arg {
     Num(f64),
     Text(String),
+    /// A `Rubevy::Entity` the script passed on: the object `Rubevy.entity` and
+    /// [`Answer::Entity`] hand out, read back through its handle rather than through a number
+    /// that has been past a `f64`.
+    Entity(Entity),
 }
 
 impl Arg {
     pub fn as_num(&self) -> Option<f64> {
         match self {
             Arg::Num(n) => Some(*n),
-            Arg::Text(_) => None,
+            Arg::Text(_) | Arg::Entity(_) => None,
         }
     }
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Arg::Text(t) => Some(t),
-            Arg::Num(_) => None,
+            Arg::Num(_) | Arg::Entity(_) => None,
+        }
+    }
+    /// The entity, where the script passed a `Rubevy::Entity` object.
+    pub fn as_entity(&self) -> Option<Entity> {
+        match self {
+            Arg::Entity(e) => Some(*e),
+            Arg::Num(_) | Arg::Text(_) => None,
         }
     }
 }
@@ -222,6 +236,11 @@ pub enum Answer {
     List(Vec<f64>),
     /// A list of rows of numbers: a table, e.g. every robot with its team and hp.
     Rows(Vec<Vec<f64>>),
+    /// An entity, as the `Rubevy::Entity` object a script can pass back to `Rubevy.despawn`,
+    /// `Rubevy.set_position` or `Rubevy.ask`. Inside [`Answer::List`] and [`Answer::Rows`] an
+    /// entity is still a number (`Entity::to_bits` through a `f64`), which is what a table of
+    /// them wants; this is the way to hand one over without that.
+    Entity(Entity),
 }
 
 impl Request {
@@ -236,6 +255,10 @@ impl Request {
     /// The `i`th argument as a number, or `or` where there is none.
     pub fn num_or(&self, i: usize, or: f64) -> f64 {
         self.num(i).unwrap_or(or)
+    }
+    /// The `i`th argument as an entity, where the script passed a `Rubevy::Entity`.
+    pub fn entity_arg(&self, i: usize) -> Option<Entity> {
+        self.args.get(i).and_then(Arg::as_entity)
     }
 }
 
@@ -262,6 +285,11 @@ pub struct ScriptWorld {
     tick_remainder: f32,
     /// What scripts asked the game for and are waiting on (`Rubevy.ask`).
     requests: Vec<Request>,
+    /// The `Rubevy::Entity` class, for [`ScriptWorld::answer`] to build an [`Answer::Entity`]
+    /// with. The natives carry it in their closures.
+    entity_class: ObjId,
+    /// How many entity objects the collector has taken, counted by the free hook.
+    freed_entities: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ScriptWorld {
@@ -278,7 +306,19 @@ impl ScriptWorld {
         // the natives' side of the bridge lives in the VM, not in a static, so two `App`s in
         // one process each have their own (`Vm::set_host_state`)
         vm.set_host_state(HostState::default());
-        install_host_api(&mut vm);
+        let entity_class = install_host_api(&mut vm);
+        // An entity object owns nothing on the host's side — its handle *is* `Entity::to_bits`,
+        // and the ECS is what says whether that entity still exists — so there is nothing to
+        // release here. The hook is registered all the same: it is the place a kind of Data that
+        // does own something (a handle into a slab) would give it back, and counting keeps the
+        // path exercised (`ScriptWorld::freed_entities`).
+        let freed_entities = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = freed_entities.clone();
+        vm.set_on_free(Box::new(move |tag, _handle| {
+            if tag == ENTITY_TAG {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }));
         // a clock for the time limits (`frame_time`, `overrun`). Timeslices stay counted in
         // instructions, so what a script does is the same on every machine; the clock only keeps a
         // frame from being lost to one that the count cannot stop
@@ -290,6 +330,8 @@ impl ScriptWorld {
             overrun: Some(std::time::Duration::from_millis(50)),
             tick_remainder: 0.0,
             requests: Vec::new(),
+            entity_class,
+            freed_entities,
         })
     }
 
@@ -325,6 +367,13 @@ impl ScriptWorld {
         std::mem::take(&mut self.requests)
     }
 
+    /// How many `Rubevy::Entity` objects the collector has taken since the VM started, as the
+    /// free hook ([`Vm::set_on_free`]) counted them. An entity object owns nothing on the
+    /// host's side, so the hook has nothing to release; this is what shows it runs.
+    pub fn freed_entities(&self) -> u64 {
+        self.freed_entities.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Answers a request: the script's `Rubevy.ask` returns this value and its task becomes
     /// ready again. The queue is let go of here, so answer each request once.
     pub fn answer(&mut self, request: &Request, answer: Answer) {
@@ -337,6 +386,7 @@ impl ScriptWorld {
                 let items: Vec<Value> = ns.into_iter().map(Value::Float).collect();
                 self.vm.ary_new(items)
             }
+            Answer::Entity(e) => self.vm.data_new(self.entity_class, ENTITY_TAG, e.to_bits()),
             Answer::Rows(rows) => {
                 let items: Vec<Value> = rows
                     .into_iter()
@@ -609,8 +659,65 @@ fn entity_from_bits(bits: u64) -> Option<Entity> {
 
 // ------------------------------------------------------------------ the Ruby side
 
-fn install_host_api(vm: &mut Vm) {
+/// What a `Rubevy::Entity` object is, in the `tag` of [`Vm::data_new`]. A host that gives its
+/// scripts Data objects of its own picks other numbers.
+pub const ENTITY_TAG: u32 = 1;
+
+/// Defines `Rubevy::Entity`, the class of the object a script holds an entity in, and answers it.
+///
+/// It is a Data object (`Vm::data_new`): the VM carries `Entity::to_bits` and never reads
+/// through it. `==`, `eql?` and `hash` go by that handle, so two objects naming the same entity
+/// are equal and are one key in a Hash, while `dup` and `clone` refuse — which is the point of
+/// the kind. What is defined here is `to_i` (the bits, for a script or a game that wants the
+/// number) and `inspect`/`to_s`, so that `p entity` says which entity it is.
+fn define_entity_class(vm: &mut Vm, module: ObjId) -> ObjId {
+    // There is no `define_class_under` on the VM, so the class is made and named the way Ruby
+    // does it: `Class.new(Object)` and `Rubevy.const_set(:Entity, it)`, which also gives the
+    // anonymous class its name and its outer module (`Rubevy::Entity`).
+    let new = vm.intern("new");
+    let object = Value::Obj(vm.core.object);
+    let class = Value::Obj(vm.core.class);
+    let entity = vm.funcall(class, new, &[object], Value::Nil).expect("Class.new");
+    let const_set = vm.intern("const_set");
+    let name = Value::Sym(vm.intern("Entity"));
+    vm.funcall(Value::Obj(module), const_set, &[name, entity], Value::Nil).expect("Rubevy::Entity");
+    let entity = entity.obj().expect("a class is an object");
+    vm.define_fn(entity, "to_i", |this: This<DataRef>| this.handle as i64);
+    vm.define_fn(entity, "inspect", |this: This<DataRef>| entity_inspect(this.handle));
+    vm.define_fn(entity, "to_s", |this: This<DataRef>| entity_inspect(this.handle));
+    entity
+}
+
+fn entity_inspect(handle: u64) -> String {
+    match entity_from_bits(handle) {
+        Some(e) => format!("#<Rubevy::Entity {e}>"),
+        None => format!("#<Rubevy::Entity bits={handle}>"),
+    }
+}
+
+/// The entity an argument names: either a `Rubevy::Entity` object, or the Integer of
+/// `Entity::to_bits` that the host API took before there was one (`Rubevy.despawn 12884901888`),
+/// which still works.
+fn entity_arg(vm: &mut Vm, v: Option<&Value>) -> Result<u64, VmError> {
+    match v {
+        Some(v) => match vm.data_of(*v) {
+            Some((ENTITY_TAG, handle)) => Ok(handle),
+            _ => Ok(vm.expect_int(*v, "entity")? as u64),
+        },
+        None => Ok(0),
+    }
+}
+
+/// Defines the `Rubevy` module and its methods, and answers the `Rubevy::Entity` class.
+///
+/// The methods are closures ([`Vm::define_closure`]) rather than bare function pointers: they
+/// carry the entity class, which is what lets `Rubevy.entity` and `Rubevy.ask` build and read
+/// entity objects. What they may not carry is the game — a native gets `&mut Vm` and nothing
+/// else — so everything that touches the world is left on the queue in the VM's host state
+/// ([`HostState`]) for [`drain_commands`].
+fn install_host_api(vm: &mut Vm) -> ObjId {
     let m = vm.define_module("Rubevy");
+    let entity_class = define_entity_class(vm, m);
     let sc = vm.singleton_class(Value::Obj(m)).expect("Rubevy singleton");
     vm.define_closure(sc, "log", |vm, _s, a, _b| {
         let text = match a.first() {
@@ -630,11 +737,19 @@ fn install_host_api(vm: &mut Vm) {
         Ok(Value::Nil)
     });
     vm.define_closure(sc, "despawn", |vm, _s, a, _b| {
-        let bits = a.first().map(|v| vm.expect_int(*v, "entity")).transpose()?.unwrap_or(0);
-        push_command(vm, HostCommand::Despawn(bits as u64));
+        let bits = entity_arg(vm, a.first())?;
+        push_command(vm, HostCommand::Despawn(bits));
         Ok(Value::Nil)
     });
-    vm.define_closure(sc, "entity", |vm, _s, _a, _b| Ok(current_entity(vm)));
+    // the entity this script is attached to, as a `Rubevy::Entity`. A fresh object each call:
+    // two of them for the same entity are `==` and hash alike, so a script cannot tell, and the
+    // ones it drops are what the free hook sees
+    vm.define_closure(sc, "entity", move |vm, _s, _a, _b| {
+        Ok(match current_entity(vm) {
+            Value::Int(bits) => vm.data_new(entity_class, ENTITY_TAG, bits as u64),
+            _ => Value::Nil,
+        })
+    });
     vm.define_closure(sc, "move_to", |vm, _s, a, _b| {
         // the entity the script is attached to, which is the common case
         let Value::Int(bits) = current_entity(vm) else { return Ok(Value::Nil) };
@@ -651,6 +766,16 @@ fn install_host_api(vm: &mut Vm) {
         };
         let mut args: Vec<Arg> = Vec::with_capacity(a.len().saturating_sub(1));
         for v in &a[1..] {
+            // an entity the script was given keeps its identity across the boundary; everything
+            // else is a number or a string, as before
+            let as_entity = match vm.data_of(*v) {
+                Some((ENTITY_TAG, handle)) => entity_from_bits(handle),
+                _ => None,
+            };
+            if let Some(e) = as_entity {
+                args.push(Arg::Entity(e));
+                continue;
+            }
             args.push(match v {
                 Value::Int(i) => Arg::Num(*i as f64),
                 Value::Float(f) => Arg::Num(*f),
@@ -668,11 +793,12 @@ fn install_host_api(vm: &mut Vm) {
         Ok(Value::Obj(queue))
     });
     vm.define_closure(sc, "set_position", |vm, _s, a, _b| {
-        let bits = a.first().map(|v| vm.expect_int(*v, "entity")).transpose()?.unwrap_or(0) as u64;
+        let bits = entity_arg(vm, a.first())?;
         let (x, y, z) = (num(vm, a.get(1)), num(vm, a.get(2)), num(vm, a.get(3)));
         push_command(vm, HostCommand::SetPosition { entity: bits, x, y, z });
         Ok(Value::Nil)
     });
+    entity_class
 }
 
 /// The entity of the task the scheduler is running, as `Entity::to_bits`.
