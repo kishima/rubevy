@@ -95,3 +95,83 @@ sabiruby の `docs/worklog/2026-09-16-leftovers.md` の項目 1 が
 （`Rubevy.entity` も答えること）、子タスクが `Rubevy.subscribe` できて **そのエンティティ宛の** publish が
 届くこと、そして `@rubevy_entity` を自分で書けば別のエンティティとして振る舞えること
 （rubevy_games が手で書いていた道は残る）。前の prelude.mrb に戻すと最初の 2 本が落ち、3 本目だけ通る。
+
+## 3. 購読が終わるときに、待っているタスクを終わらせる
+
+reflex の worklog の最後の節が測っていたもの。倒れたロボットの `ScriptTask` が外されると
+rubevy はそのタスクを `terminate` するが、`stop_task`（`ext_task.rs:398`）は
+コンテキストの `ci` と `stack` を clear して `Terminated` にするだけで**巻き戻さない**ので `ensure` は走らない。
+そして `Task.new` で作った子タスクは rubevy が知らないので terminate すらされず、
+誰も publish しないキューの上で `WAITING` のまま残る。`Task.list` の出力に
+`Scout-hit:WAITING` が 3 つ並んでいるのがそれで、ロボット 1 体につきコンテキストが 1 本、VM が生きている間ずっと。
+
+### `Task::Queue` に何があるか
+
+`close` はある（`ext_task.rs:854`）。`@closed` を立てて `wake_queue_waiters(vm, o, true)` で
+**parkしている全部を起こす**。起きた側は Ruby の `pop` のループが `__pop_try` を呼び直し、
+`queue_pop_try` は閉じたキューで `Ok(Value::Nil)` を返す（`ext_task.rs:888`）。
+つまり **close は例外ではなく nil**。本家の mruby-task もそうで、
+`tests/mrbtest/src/gem_queue.rb:140` の「blocking pop returns nil when queue is closed」がそれを固定している。
+
+ここが今回の判断のしどころだった。nil のままだと、待っていたタスクは起きるが
+
+```ruby
+loop { $seen << hits.pop }
+```
+
+は **park しなくなっただけで回り続ける**。閉じたキューの `pop` は即座に nil を返すので、
+寝ていた 1 本のリークが、毎フレーム命令予算を食う 1 本のリークに変わる。`ensure` も走らない。
+`while (ev = q.pop)` と書いてあれば終わるが、それはスクリプトの書き方次第で、
+「書き忘れると静かに壊れる」ことこそが直そうとしている穴だった。
+
+VM に「起こして例外を上げる」入り口は無い（`terminate` は巻き戻さない、`Task::Error` は
+push と非ブロッキング pop が上げるもので、待っている側には届かない）。指示が挙げていた
+「prelude が分かる番兵を push する」も考えたが、番兵を見て raise するには結局 `pop` の側に
+1 枚かぶせることになる。**かぶせるなら番兵は要らない**——close された上での nil が、
+そのままその番兵になる。
+
+### 決めたこと
+
+`Rubevy.subscribe` が返すキューだけに、`Rubevy::Subscription` を `extend` する（クラスではなく
+**そのオブジェクト 1 つ**に。`Rubevy.ask` のキューは今までどおり素の `Task::Queue`）。
+
+```ruby
+module Subscription
+  def pop(*args)
+    value = super
+    raise Unsubscribed, "the subscription ended" if value.nil? && closed?
+    value
+  end
+  alias shift pop
+  alias deq pop
+end
+```
+
+`extend` は Rust 側の `subscribe` ネイティブでやっている（`vm.const_get(m, :Subscription)` →
+`funcall(queue, :extend, …)`）。prelude で `Rubevy.subscribe` に別名を張って包む形でも書けるが、
+そうすると「購読を作る場所」が Rust と Ruby の 2 か所になる。prelude は名前を定義するだけにした。
+
+`ScriptWorld::unsubscribe` は、キューを手放す前に `close` を送る。ここは
+`ScriptTask` が外されたとき（＝エンティティが despawn された、スクリプトが差し替えられた）と、
+スクリプトのタスクが自分の終わりまで走ったときの 2 か所から呼ばれる。`close` はネイティブ 1 本で、
+スケジューラを回さない（起こすだけ）ので、`DeferredWorld` のフック（`stop_removed_task`）から呼んでも
+再入は無い。
+
+閉じたキューに**残っていた分は先に pop される**（`queue_pop_try` は items を先に見る）ので、
+遅れていたスクリプトは取りこぼしを読んでから終わりを知る。テストの 2 本目がそれ。
+
+### 確かめ方
+
+`target/release/sabiruby` で先に素の Ruby で確かめた（`extend` した `pop` からの `super` が
+`Task::Queue#pop` に届くか、`alias` した `shift` / `deq` からの `super` も同じか、
+`ensure` が走るか、拾われなかった例外がタスクの結果になってプログラムを落とさないか）。全部そのとおりだった。
+
+rubevy 側のテストは `tests/events.rs` に 2 本:
+
+* `a_task_waiting_on_a_subscription_ends_when_the_script_does`:
+  `Task.new` の中で `loop { hits.pop }`、`ensure` で `Rubevy.ask("reflex_ensure")`（**pop はしない**。
+  巻き戻している最中に park させない）。despawn するまで ensure は走らず、despawn の後に走る。
+* `a_script_can_rescue_the_end_of_its_subscription`: `rescue Rubevy::Unsubscribed` で
+  自分の終わり方を決められること、閉じる前に積まれていた 1 件を読んでから終わること。
+
+`close` の送信だけを外して同じテストを回すと 2 本とも落ちる（起きないので ensure も rescue も走らない）。

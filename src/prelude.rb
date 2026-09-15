@@ -58,6 +58,37 @@ module Rubevy
   def self.find(name)
     ask("entities.with", name.to_s).pop
   end
+
+  # Raised in whatever is waiting on a subscription's queue when the subscription ends: the
+  # script's entity was despawned, its `ScriptTask` was taken away, or its own task ran off its
+  # end. Nothing will ever be published to that queue again, so a `pop` that answered would be
+  # answering for ever.
+  #
+  # It is raised rather than answered with nil so that a waiting task *unwinds*: an `ensure` in
+  # it runs, and the task ends instead of standing on a queue nobody can fill (a task the
+  # scheduler keeps, holding its context, for as long as the VM lives). A script that wants to
+  # end quietly rescues it.
+  class Unsubscribed < StandardError; end
+
+  # What `Rubevy.subscribe` extends the queue it answers with (one object, not the class: an
+  # `Rubevy.ask` queue is an ordinary `Task::Queue` and keeps the gem's own meaning).
+  #
+  # mruby-task's `Queue#close` wakes everything parked on the queue and makes `pop` answer nil
+  # from then on — the gem's way of saying "no more", and the reason rubevy closes a queue it
+  # lets go of. nil is a poor thing for a script to have to notice, though: `loop { q.pop }`
+  # against a closed queue never parks again, so the leaked task becomes a busy one. The
+  # subscription turns that nil into the exception above. Items already in the queue when it
+  # closed are popped first, so a script that was behind still sees what it missed.
+  module Subscription
+    def pop(*args)
+      value = super
+      raise Unsubscribed, "the subscription ended" if value.nil? && closed?
+      value
+    end
+
+    alias shift pop
+    alias deq pop
+  end
 end
 
 # A task a script makes with `Task.new` carries the entity of the task that made it.

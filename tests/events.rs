@@ -291,3 +291,73 @@ fn a_despawned_script_stops_listening() {
     app.world_mut().entity_mut(entity).despawn();
     assert_eq!(app.world().resource::<ScriptWorld>().subscriptions(), 0);
 }
+
+/// A task waiting on a subscription is ended by the unsubscription, rather than left standing
+/// on a queue nothing can fill: the queue is closed, `Rubevy::Subscription#pop` raises
+/// `Rubevy::Unsubscribed` in whatever was parked on it, and the task unwinds through its
+/// `ensure`. Without that the task stays `WAITING` for as long as the VM lives — one leaked
+/// context per script that had a second task.
+#[test]
+fn a_task_waiting_on_a_subscription_ends_when_the_script_does() {
+    let mut app = app();
+    let entity = run(
+        &mut app,
+        r#"
+          hits = Rubevy.subscribe(:hit)
+          Task.new(name: "reflex") do
+            begin
+              loop { hits.pop }
+            ensure
+              Rubevy.ask("reflex_ensure")   # not popped: nothing may park while unwinding
+            end
+          end
+          Rubevy.ask("ready").pop
+          loop { sleep 0.05 }
+        "#,
+    );
+    until_ready(&mut app);
+    frames(&mut app, 3);
+    assert_eq!(app.world().resource::<ScriptWorld>().subscriptions(), 1);
+    assert!(asked(&app, "reflex_ensure").is_none(), "the reflex task is waiting, not ending");
+
+    app.world_mut().entity_mut(entity).despawn();
+    frames(&mut app, 10);
+
+    assert_eq!(app.world().resource::<ScriptWorld>().subscriptions(), 0);
+    assert!(
+        asked(&app, "reflex_ensure").is_some(),
+        "the waiting task woke on the closed queue and ran its ensure"
+    );
+}
+
+/// What a script sees of the end: the exception, which it may rescue to finish on its own terms.
+#[test]
+fn a_script_can_rescue_the_end_of_its_subscription() {
+    let mut app = app();
+    let entity = run(
+        &mut app,
+        r#"
+          hits = Rubevy.subscribe(:hit)
+          $seen = []
+          Task.new(name: "reflex") do
+            begin
+              loop { $seen << hits.pop }
+            rescue Rubevy::Unsubscribed
+              Rubevy.ask("rescued", $seen.length, $seen[0].to_f)
+            end
+          end
+          Rubevy.ask("ready").pop
+          loop { sleep 0.05 }
+        "#,
+    );
+    until_ready(&mut app);
+    // one message is in the queue when it closes: the backlog is popped before the end is
+    app.world_mut().resource_mut::<ScriptWorld>().publish(Some(entity), "hit", Answer::Num(5.0));
+    frames(&mut app, 3);
+
+    app.world_mut().entity_mut(entity).despawn();
+    frames(&mut app, 10);
+
+    let r = asked(&app, "rescued").expect("the task rescued the end of its subscription");
+    assert_eq!((r.num(0), r.num(1)), (Some(1.0), Some(5.0)), "it read what was queued first");
+}
