@@ -68,8 +68,9 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
    `pop`s, a system of the game takes the requests (`ScriptWorld::take_requests`), answers
    from ordinary queries, and hands back numbers, strings, lists or tables
    (`ScriptWorld::answer`). The rules of the game stay in Rust; Ruby only asks. Wrapping
-   `Entity` in a Ruby object is not done. Before it, natives need a typed way to the host's
-   state: they are `fn` pointers and cannot capture, so the command queue is a `static` today.
+   `Entity` in a Ruby object is done since 2026-09-15 (`Rubevy::Entity`, a `Data` object that
+   carries the entity's bits; `Answer::Entity`, `Arg::Entity`), and natives can be closures with
+   the command queue in the VM's typed host state, so there is no `static` any more.
 4. **Reflect, no per-type glue.** With `Reflect`/`ReflectComponent`, field names and
    types are known at run time, so Ruby can do `entity[:Transform].translation.x = 1.0`
    without hand-written bindings. Ruby's dynamic access and Bevy's reflection are the same
@@ -138,8 +139,8 @@ and a `ScriptEnded` message. The game that uses all of it is SabiRuby Battle
   (`task_set_clock`), `Timeslice::{Instructions, Time, Both}`, `RunLimits`, `Task::Overrun`. The
   clock is read at the existing instruction tick and every 32 natives, so benchmarks without a
   clock stayed within noise.
-* `Data` objects with `Drop` — to do (the ECS bridge's first step).
-* A typed host state reachable from natives (instead of a `static`) — to do.
+* `Data` objects with a free hook — **done** (2026-09-15, `ObjKind::Data`, `set_on_free`); rubevy's `Rubevy::Entity` uses it.
+* A typed host state reachable from natives (instead of a `static`) — **done** (2026-09-15, `set_host_state`, `define_closure`).
 * `gc_step(work)` — to do.
 * A heap cap — to do (possibility 4).
 
